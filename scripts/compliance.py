@@ -318,9 +318,10 @@ def matter_profitability_report(conn, args):
     matters = conn.execute("""
         SELECT m.id, m.title, m.practice_area, m.billing_method,
                m.status, m.billed_amount, m.collected_amount, m.budget,
-               c.name as client_name
+               cust.name as client_name
         FROM legalclaw_matter m
-        JOIN legalclaw_client c ON m.client_id = c.id
+        JOIN legalclaw_client_ext ext ON m.client_id = ext.id
+        JOIN customer cust ON ext.customer_id = cust.id
         WHERE m.company_id = ?
         ORDER BY m.opened_date DESC
     """, (args.company_id,)).fetchall()

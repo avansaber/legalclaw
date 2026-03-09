@@ -4,6 +4,7 @@
 AI-native legal practice management: matters, time & billing, trust accounting,
 documents, calendar, conflicts, compliance.
 ~16 tables across 7 domains, all prefixed with legalclaw_.
+legalclaw_client_ext links to core customer(id) via FK -- no shadow client table.
 
 Prerequisite: ERPClaw init_db.py must have run first (creates foundation tables).
 Run: python3 init_db.py [db_path]
@@ -17,7 +18,7 @@ DEFAULT_DB_PATH = os.path.expanduser("~/.openclaw/erpclaw/data.sqlite")
 DISPLAY_NAME = "LegalClaw"
 
 REQUIRED_FOUNDATION = [
-    "company", "naming_series", "audit_log",
+    "company", "customer", "naming_series", "audit_log",
 ]
 
 
@@ -50,31 +51,27 @@ def init_legalclaw_schema(db_path=None):
         -- DOMAIN 1: MATTER MANAGEMENT (3 tables)
         -- ==========================================================
 
-        CREATE TABLE IF NOT EXISTS legalclaw_client (
+        CREATE TABLE IF NOT EXISTS legalclaw_client_ext (
             id              TEXT PRIMARY KEY,
-            naming_series   TEXT,
-            name            TEXT NOT NULL,
-            client_type     TEXT NOT NULL DEFAULT 'individual'
+            naming_series   TEXT DEFAULT 'LCLI-',
+            customer_id     TEXT NOT NULL REFERENCES customer(id),
+            client_type     TEXT DEFAULT 'individual'
                             CHECK(client_type IN ('individual','business','government','nonprofit')),
-            email           TEXT,
-            phone           TEXT,
-            address         TEXT,
-            tax_id          TEXT,
-            billing_rate    TEXT DEFAULT '0',
-            is_active       INTEGER NOT NULL DEFAULT 1,
+            billing_rate    TEXT,
+            is_active       INTEGER DEFAULT 1,
             company_id      TEXT NOT NULL REFERENCES company(id),
             created_at      TEXT DEFAULT (datetime('now')),
             updated_at      TEXT DEFAULT (datetime('now'))
         );
-        CREATE INDEX IF NOT EXISTS idx_legalclaw_client_company
-            ON legalclaw_client(company_id);
-        CREATE INDEX IF NOT EXISTS idx_legalclaw_client_name
-            ON legalclaw_client(name);
+        CREATE INDEX IF NOT EXISTS idx_legalclaw_client_ext_company
+            ON legalclaw_client_ext(company_id);
+        CREATE INDEX IF NOT EXISTS idx_legalclaw_client_ext_customer
+            ON legalclaw_client_ext(customer_id);
 
         CREATE TABLE IF NOT EXISTS legalclaw_matter (
             id              TEXT PRIMARY KEY,
             naming_series   TEXT,
-            client_id       TEXT NOT NULL REFERENCES legalclaw_client(id),
+            client_id       TEXT NOT NULL REFERENCES legalclaw_client_ext(id),
             matter_number   TEXT,
             title           TEXT NOT NULL,
             practice_area   TEXT NOT NULL DEFAULT 'general'
@@ -178,7 +175,7 @@ def init_legalclaw_schema(db_path=None):
             id              TEXT PRIMARY KEY,
             naming_series   TEXT,
             matter_id       TEXT NOT NULL REFERENCES legalclaw_matter(id),
-            client_id       TEXT NOT NULL REFERENCES legalclaw_client(id),
+            client_id       TEXT NOT NULL REFERENCES legalclaw_client_ext(id),
             invoice_date    TEXT NOT NULL DEFAULT (date('now')),
             due_date        TEXT,
             time_amount     TEXT NOT NULL DEFAULT '0',
@@ -190,6 +187,7 @@ def init_legalclaw_schema(db_path=None):
                             CHECK(format IN ('standard','ledes')),
             status          TEXT NOT NULL DEFAULT 'draft'
                             CHECK(status IN ('draft','sent','paid','partially_paid','overdue','written_off')),
+            sales_invoice_id TEXT,
             notes           TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id),
             created_at      TEXT DEFAULT (datetime('now')),
@@ -216,6 +214,9 @@ def init_legalclaw_schema(db_path=None):
             account_type    TEXT NOT NULL DEFAULT 'iolta'
                             CHECK(account_type IN ('iolta','escrow','retainer','other')),
             current_balance TEXT NOT NULL DEFAULT '0',
+            gl_account_id   TEXT REFERENCES account(id),
+            trust_liability_account_id TEXT REFERENCES account(id),
+            interest_income_account_id TEXT REFERENCES account(id),
             company_id      TEXT NOT NULL REFERENCES company(id),
             created_at      TEXT DEFAULT (datetime('now')),
             updated_at      TEXT DEFAULT (datetime('now'))
@@ -234,6 +235,7 @@ def init_legalclaw_schema(db_path=None):
             reference           TEXT,
             payee               TEXT,
             description         TEXT,
+            gl_entry_ids        TEXT,
             company_id          TEXT NOT NULL REFERENCES company(id),
             created_at          TEXT DEFAULT (datetime('now'))
         );

@@ -2,6 +2,10 @@
 
 Actions for matter management (3 tables, 14 actions).
 Imported by db_query.py (unified router).
+
+Client records use legalclaw_client_ext (extension table) which FKs to core customer(id).
+Core customer fields (name, email, phone, address, tax_id) live in the customer table;
+domain-specific fields (client_type, billing_rate) live in the ext table.
 """
 import json
 import os
@@ -17,8 +21,9 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.cross_skill import create_customer, CrossSkillError
 
-    ENTITY_PREFIXES.setdefault("legalclaw_client", "LCLT-")
+    ENTITY_PREFIXES.setdefault("legalclaw_client_ext", "LCLI-")
     ENTITY_PREFIXES.setdefault("legalclaw_matter", "LMTR-")
 except ImportError:
     pass
@@ -54,7 +59,7 @@ def _validate_company(conn, company_id):
 def _validate_client(conn, client_id):
     if not client_id:
         err("--client-id is required")
-    if not conn.execute("SELECT id FROM legalclaw_client WHERE id = ?", (client_id,)).fetchone():
+    if not conn.execute("SELECT id FROM legalclaw_client_ext WHERE id = ?", (client_id,)).fetchone():
         err(f"Client {client_id} not found")
 
 
@@ -83,28 +88,47 @@ def add_client(conn, args):
     client_type = getattr(args, "client_type", None) or "individual"
     _validate_enum(client_type, VALID_CLIENT_TYPES, "client-type")
 
-    billing_rate = getattr(args, "billing_rate", None) or "0"
-    to_decimal(billing_rate)  # validate
+    billing_rate = getattr(args, "billing_rate", None)
+    if billing_rate:
+        to_decimal(billing_rate)  # validate
 
-    client_id = str(uuid.uuid4())
-    ns = get_next_name(conn, "legalclaw_client", company_id=args.company_id)
+    # Map legal client_type to core customer_type
+    core_customer_type = "individual" if client_type == "individual" else "company"
+
+    # Create core customer via cross_skill (respects table ownership)
+    db_path = getattr(args, "db_path", None)
+    try:
+        cust_result = create_customer(
+            customer_name=name,
+            company_id=args.company_id,
+            customer_type=core_customer_type,
+            email=getattr(args, "email", None),
+            phone=getattr(args, "phone", None),
+            db_path=db_path,
+        )
+        customer_id = cust_result.get("customer_id", "")
+        if not customer_id:
+            err("Failed to create core customer record: no customer_id returned")
+    except CrossSkillError as e:
+        err(f"Failed to create core customer record: {e}")
+
+    # Insert extension record
+    ext_id = str(uuid.uuid4())
+    ns = get_next_name(conn, "legalclaw_client_ext", company_id=args.company_id)
     now = _now_iso()
     conn.execute("""
-        INSERT INTO legalclaw_client (
-            id, naming_series, name, client_type, email, phone, address,
-            tax_id, billing_rate, is_active, company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        INSERT INTO legalclaw_client_ext (
+            id, naming_series, customer_id, client_type, billing_rate,
+            is_active, company_id, created_at, updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?)
     """, (
-        client_id, ns, name, client_type,
-        getattr(args, "email", None),
-        getattr(args, "phone", None),
-        getattr(args, "address", None),
-        getattr(args, "tax_id", None),
+        ext_id, ns, customer_id, client_type,
         billing_rate, 1, args.company_id, now, now,
     ))
-    audit(conn, "legalclaw_client", client_id, "legal-add-client", args.company_id)
+    audit(conn, "legalclaw_client_ext", ext_id, "legal-add-client", args.company_id)
     conn.commit()
-    ok({"id": client_id, "naming_series": ns, "name": name, "client_type": client_type})
+    ok({"id": ext_id, "naming_series": ns, "customer_id": customer_id,
+        "name": name, "client_type": client_type})
 
 
 # ---------------------------------------------------------------------------
@@ -114,44 +138,73 @@ def update_client(conn, args):
     client_id = getattr(args, "client_id", None)
     if not client_id:
         err("--client-id is required")
-    row = conn.execute("SELECT id FROM legalclaw_client WHERE id = ?", (client_id,)).fetchone()
+    row = conn.execute("""
+        SELECT ext.id, ext.customer_id FROM legalclaw_client_ext ext WHERE ext.id = ?
+    """, (client_id,)).fetchone()
     if not row:
         err(f"Client {client_id} not found")
 
-    updates, params, changed = [], [], []
-    for arg_name, col_name in {
-        "name": "name", "client_type": "client_type", "email": "email",
-        "phone": "phone", "address": "address", "tax_id": "tax_id",
-        "billing_rate": "billing_rate",
+    customer_id = row["customer_id"]
+
+    # --- Update core customer fields via cross_skill ---
+    core_updates = {}
+    for arg_name, flag_name in {
+        "name": "--name",
+        "email": "--email",
+        "phone": "--phone",
     }.items():
         val = getattr(args, arg_name, None)
         if val is not None:
-            if arg_name == "client_type":
-                _validate_enum(val, VALID_CLIENT_TYPES, "client-type")
-            if arg_name == "billing_rate":
-                to_decimal(val)
-            updates.append(f"{col_name} = ?")
-            params.append(val)
-            changed.append(col_name)
+            core_updates[flag_name] = val
 
-    # Handle is_active separately (integer)
+    changed = []
+    if core_updates:
+        from erpclaw_lib.cross_skill import call_skill_action
+        core_args = {"--customer-id": customer_id}
+        core_args.update(core_updates)
+        db_path = getattr(args, "db_path", None)
+        try:
+            call_skill_action("erpclaw-selling", "update-customer",
+                              args=core_args, db_path=db_path)
+        except CrossSkillError as e:
+            err(f"Failed to update core customer: {e}")
+        changed.extend([k.lstrip("-").replace("-", "_") for k in core_updates.keys()])
+
+    # --- Update extension table fields ---
+    ext_updates, ext_params = [], []
+    client_type = getattr(args, "client_type", None)
+    if client_type is not None:
+        _validate_enum(client_type, VALID_CLIENT_TYPES, "client-type")
+        ext_updates.append("client_type = ?")
+        ext_params.append(client_type)
+        changed.append("client_type")
+
+    billing_rate = getattr(args, "billing_rate", None)
+    if billing_rate is not None:
+        to_decimal(billing_rate)
+        ext_updates.append("billing_rate = ?")
+        ext_params.append(billing_rate)
+        changed.append("billing_rate")
+
     is_active = getattr(args, "is_active", None)
     if is_active is not None:
-        updates.append("is_active = ?")
-        params.append(int(is_active))
+        ext_updates.append("is_active = ?")
+        ext_params.append(int(is_active))
         changed.append("is_active")
 
-    if not updates:
+    if not changed:
         err("No fields to update")
 
-    updates.append("updated_at = ?")
-    params.append(_now_iso())
-    params.append(client_id)
-    conn.execute(f"UPDATE legalclaw_client SET {', '.join(updates)} WHERE id = ?", params)
-    audit(conn, "legalclaw_client", client_id, "legal-update-client",
+    if ext_updates:
+        ext_updates.append("updated_at = ?")
+        ext_params.append(_now_iso())
+        ext_params.append(client_id)
+        conn.execute(f"UPDATE legalclaw_client_ext SET {', '.join(ext_updates)} WHERE id = ?", ext_params)
+
+    audit(conn, "legalclaw_client_ext", client_id, "legal-update-client",
           getattr(args, "company_id", None))
     conn.commit()
-    ok({"id": client_id, "updated_fields": changed})
+    ok({"id": client_id, "customer_id": customer_id, "updated_fields": changed})
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +214,14 @@ def get_client(conn, args):
     client_id = getattr(args, "client_id", None)
     if not client_id:
         err("--client-id is required")
-    row = conn.execute("SELECT * FROM legalclaw_client WHERE id = ?", (client_id,)).fetchone()
+    row = conn.execute("""
+        SELECT ext.*, c.name, c.customer_type AS core_customer_type,
+               c.primary_address AS address, c.primary_contact AS phone,
+               c.tax_id
+        FROM legalclaw_client_ext ext
+        JOIN customer c ON ext.customer_id = c.id
+        WHERE ext.id = ?
+    """, (client_id,)).fetchone()
     if not row:
         err(f"Client {client_id} not found")
     ok(row_to_dict(row))
@@ -171,20 +231,26 @@ def get_client(conn, args):
 # 4. list-clients
 # ---------------------------------------------------------------------------
 def list_clients(conn, args):
-    sql = "SELECT * FROM legalclaw_client WHERE 1=1"
+    sql = """
+        SELECT ext.*, c.name, c.primary_address AS address,
+               c.primary_contact AS phone, c.tax_id
+        FROM legalclaw_client_ext ext
+        JOIN customer c ON ext.customer_id = c.id
+        WHERE 1=1
+    """
     params = []
     if args.company_id:
-        sql += " AND company_id = ?"
+        sql += " AND ext.company_id = ?"
         params.append(args.company_id)
     search = getattr(args, "search", None)
     if search:
-        sql += " AND (name LIKE ? OR email LIKE ?)"
+        sql += " AND (c.name LIKE ? OR c.primary_contact LIKE ?)"
         params.extend([f"%{search}%", f"%{search}%"])
     is_active = getattr(args, "is_active", None)
     if is_active is not None:
-        sql += " AND is_active = ?"
+        sql += " AND ext.is_active = ?"
         params.append(int(is_active))
-    sql += " ORDER BY name ASC LIMIT ? OFFSET ?"
+    sql += " ORDER BY c.name ASC LIMIT ? OFFSET ?"
     params.extend([args.limit, args.offset])
     rows = conn.execute(sql, params).fetchall()
     ok({"clients": [row_to_dict(r) for r in rows], "count": len(rows)})
@@ -523,7 +589,12 @@ def client_portfolio(conn, args):
     client_id = getattr(args, "client_id", None)
     _validate_client(conn, client_id)
 
-    client = conn.execute("SELECT * FROM legalclaw_client WHERE id = ?", (client_id,)).fetchone()
+    client = conn.execute("""
+        SELECT ext.*, c.name
+        FROM legalclaw_client_ext ext
+        JOIN customer c ON ext.customer_id = c.id
+        WHERE ext.id = ?
+    """, (client_id,)).fetchone()
     c = row_to_dict(client)
 
     matters = conn.execute("""
@@ -540,6 +611,7 @@ def client_portfolio(conn, args):
 
     ok({
         "client_id": client_id,
+        "customer_id": c.get("customer_id"),
         "client_name": c["name"],
         "client_type": c["client_type"],
         "total_matters": len(matters),

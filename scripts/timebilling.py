@@ -17,6 +17,9 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.cross_skill import (
+        create_invoice, submit_invoice, create_payment, CrossSkillError,
+    )
 
     ENTITY_PREFIXES.setdefault("legalclaw_invoice", "LINV-")
 except ImportError:
@@ -66,6 +69,31 @@ def _round_to_tenth(hours_str):
     """Round hours to nearest 0.1 (6-minute increment)."""
     d = to_decimal(hours_str)
     return str(d.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+
+
+def _lookup_customer_id(conn, client_id):
+    """Resolve legalclaw_client_ext.id -> customer.id for cross_skill calls."""
+    row = conn.execute(
+        "SELECT customer_id FROM legalclaw_client_ext WHERE id = ?", (client_id,)
+    ).fetchone()
+    if not row:
+        return None
+    return row["customer_id"]
+
+
+def _get_db_path(conn):
+    """Extract the database file path from a connection (for cross_skill calls)."""
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        if row:
+            # PRAGMA returns (seq, name, file) -- try dict access first, then index
+            try:
+                return row["file"]
+            except (IndexError, KeyError):
+                return row[2]
+    except Exception:
+        pass
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -365,21 +393,77 @@ def generate_invoice(conn, args):
     expense_amount = sum(to_decimal(r["amount"]) for r in expenses)
     total_amount = time_amount + expense_amount
 
+    # Look up matter title for invoice line item description
+    matter_full = conn.execute(
+        "SELECT title FROM legalclaw_matter WHERE id = ?", (matter_id,)
+    ).fetchone()
+    matter_title = matter_full["title"] if matter_full else "Legal Services"
+
     inv_id = str(uuid.uuid4())
     ns = get_next_name(conn, "legalclaw_invoice", company_id=args.company_id)
     now = _now_iso()
+
+    # ------------------------------------------------------------------
+    # Cross-skill: create a real sales_invoice via erpclaw-selling
+    # ------------------------------------------------------------------
+    sales_invoice_id = None
+    cross_skill_error = None
+    customer_id = _lookup_customer_id(conn, client_id)
+    db_path = _get_db_path(conn)
+
+    if customer_id:
+        # Build line items — separate time and expense lines for clarity
+        invoice_items = []
+        if time_amount > 0:
+            invoice_items.append({
+                "description": f"Legal Services - {matter_title} (time)",
+                "qty": "1",
+                "rate": str(time_amount),
+            })
+        if expense_amount > 0:
+            invoice_items.append({
+                "description": f"Legal Services - {matter_title} (expenses)",
+                "qty": "1",
+                "rate": str(expense_amount),
+            })
+
+        try:
+            inv_result = create_invoice(
+                customer_id=customer_id,
+                items=invoice_items,
+                company_id=args.company_id,
+                posting_date=invoice_date,
+                due_date=due_date,
+                remarks=f"LegalClaw invoice for matter: {matter_title}",
+                db_path=db_path,
+            )
+            # Extract the sales_invoice id from the response
+            si = inv_result.get("sales_invoice") or inv_result.get("data", {})
+            sales_invoice_id = si.get("id") if isinstance(si, dict) else None
+
+            # Auto-submit the sales invoice to post GL entries
+            if sales_invoice_id:
+                try:
+                    submit_invoice(sales_invoice_id, db_path=db_path)
+                except CrossSkillError:
+                    # Submission failure is non-fatal; invoice was created in draft
+                    pass
+        except CrossSkillError as e:
+            # Non-fatal: selling module may not be installed.
+            # Legal invoice is still created as the authoritative record.
+            cross_skill_error = str(e)
 
     conn.execute("""
         INSERT INTO legalclaw_invoice (
             id, naming_series, matter_id, client_id, invoice_date, due_date,
             time_amount, expense_amount, total_amount, paid_amount, balance,
-            format, status, notes, company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            format, status, sales_invoice_id, notes, company_id, created_at, updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         inv_id, ns, matter_id, client_id, invoice_date, due_date,
         str(time_amount), str(expense_amount), str(total_amount),
         "0", str(total_amount),
-        inv_format, "draft",
+        inv_format, "draft", sales_invoice_id,
         getattr(args, "notes", None),
         args.company_id, now, now,
     ))
@@ -398,18 +482,19 @@ def generate_invoice(conn, args):
             WHERE id = ?
         """, (inv_id, exp["id"]))
 
-    # Update matter billed_amount
+    # Update matter billed_amount (Decimal-safe addition)
+    current_billed = conn.execute(
+        "SELECT billed_amount FROM legalclaw_matter WHERE id = ?", (matter_id,)
+    ).fetchone()
+    new_billed = to_decimal(current_billed["billed_amount"]) + total_amount
     conn.execute("""
-        UPDATE legalclaw_matter
-        SET billed_amount = CAST(
-            CAST(billed_amount AS REAL) + ? AS TEXT
-        ), updated_at = ?
-        WHERE id = ?
-    """, (float(total_amount), now, matter_id))
+        UPDATE legalclaw_matter SET billed_amount = ?, updated_at = ? WHERE id = ?
+    """, (str(new_billed), now, matter_id))
 
     audit(conn, "legalclaw_invoice", inv_id, "legal-generate-invoice", args.company_id)
     conn.commit()
-    ok({
+
+    result = {
         "id": inv_id, "naming_series": ns, "matter_id": matter_id,
         "time_entries_count": len(time_entries),
         "expenses_count": len(expenses),
@@ -417,7 +502,12 @@ def generate_invoice(conn, args):
         "expense_amount": str(expense_amount),
         "total_amount": str(total_amount),
         "invoice_status": "draft",
-    })
+    }
+    if sales_invoice_id:
+        result["sales_invoice_id"] = sales_invoice_id
+    if cross_skill_error:
+        result["cross_skill_warning"] = cross_skill_error
+    ok(result)
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +575,17 @@ def send_invoice(conn, args):
     if row["status"] not in ("draft",):
         err(f"Invoice {inv_id} is not in draft status (current: {row['status']})")
 
+    # Cross-skill: submit the linked sales invoice if not already submitted
+    si_id = row["sales_invoice_id"]
+    submit_warning = None
+    if si_id:
+        db_path = _get_db_path(conn)
+        try:
+            submit_invoice(si_id, db_path=db_path)
+        except CrossSkillError as e:
+            # Non-fatal — legal invoice still transitions to sent
+            submit_warning = str(e)
+
     now = _now_iso()
     conn.execute("""
         UPDATE legalclaw_invoice SET status = 'sent', updated_at = ? WHERE id = ?
@@ -492,7 +593,12 @@ def send_invoice(conn, args):
     audit(conn, "legalclaw_invoice", inv_id, "legal-send-invoice",
           getattr(args, "company_id", None))
     conn.commit()
-    ok({"id": inv_id, "invoice_status": "sent"})
+    result = {"id": inv_id, "invoice_status": "sent"}
+    if si_id:
+        result["sales_invoice_id"] = si_id
+    if submit_warning:
+        result["cross_skill_warning"] = submit_warning
+    ok(result)
 
 
 # ---------------------------------------------------------------------------
@@ -525,6 +631,41 @@ def record_payment(conn, args):
 
     new_status = "paid" if new_balance == 0 else "partially_paid"
 
+    # ------------------------------------------------------------------
+    # Cross-skill: create a payment entry via erpclaw-payments
+    # ------------------------------------------------------------------
+    payment_entry_id = None
+    payment_warning = None
+    si_id = row["sales_invoice_id"]
+    client_id = row["client_id"]
+    customer_id = _lookup_customer_id(conn, client_id)
+    db_path = _get_db_path(conn)
+    company_id = getattr(args, "company_id", None) or row["company_id"]
+
+    if customer_id:
+        try:
+            pay_args = {
+                "payment_type": "receive",
+                "party_type": "customer",
+                "party_id": customer_id,
+                "paid_amount": str(payment_amount),
+                "company_id": company_id,
+                "remarks": f"LegalClaw payment for invoice {row.get('naming_series', inv_id)}",
+                "db_path": db_path,
+            }
+            # Link to the sales invoice if one exists
+            if si_id:
+                pay_args["reference_type"] = "sales_invoice"
+                pay_args["reference_id"] = si_id
+
+            pay_result = create_payment(**pay_args)
+            pe = pay_result.get("payment_entry") or pay_result.get("data", {})
+            payment_entry_id = pe.get("id") if isinstance(pe, dict) else None
+        except CrossSkillError as e:
+            # Non-fatal: payments module may not be installed.
+            # Legal invoice payment is still recorded locally.
+            payment_warning = str(e)
+
     now = _now_iso()
     conn.execute("""
         UPDATE legalclaw_invoice
@@ -532,24 +673,32 @@ def record_payment(conn, args):
         WHERE id = ?
     """, (str(new_paid), str(new_balance), new_status, now, inv_id))
 
-    # Update matter collected_amount
+    # Update matter collected_amount (Decimal-safe addition)
     matter_id = row["matter_id"]
+    current_collected = conn.execute(
+        "SELECT collected_amount FROM legalclaw_matter WHERE id = ?", (matter_id,)
+    ).fetchone()
+    new_collected = to_decimal(current_collected["collected_amount"]) + payment_amount
     conn.execute("""
-        UPDATE legalclaw_matter
-        SET collected_amount = CAST(
-            CAST(collected_amount AS REAL) + ? AS TEXT
-        ), updated_at = ?
-        WHERE id = ?
-    """, (float(payment_amount), now, matter_id))
+        UPDATE legalclaw_matter SET collected_amount = ?, updated_at = ? WHERE id = ?
+    """, (str(new_collected), now, matter_id))
 
     audit(conn, "legalclaw_invoice", inv_id, "legal-record-payment",
           getattr(args, "company_id", None))
     conn.commit()
-    ok({
+
+    result = {
         "id": inv_id, "payment_amount": str(payment_amount),
         "paid_amount": str(new_paid), "balance": str(new_balance),
         "invoice_status": new_status,
-    })
+    }
+    if payment_entry_id:
+        result["payment_entry_id"] = payment_entry_id
+    if si_id:
+        result["sales_invoice_id"] = si_id
+    if payment_warning:
+        result["cross_skill_warning"] = payment_warning
+    ok(result)
 
 
 # ---------------------------------------------------------------------------
@@ -622,9 +771,10 @@ def ar_aging_report(conn, args):
     _validate_company(conn, args.company_id)
 
     rows = conn.execute("""
-        SELECT i.*, c.name as client_name, m.title as matter_title
+        SELECT i.*, cust.name as client_name, m.title as matter_title
         FROM legalclaw_invoice i
-        JOIN legalclaw_client c ON i.client_id = c.id
+        JOIN legalclaw_client_ext ext ON i.client_id = ext.id
+        JOIN customer cust ON ext.customer_id = cust.id
         JOIN legalclaw_matter m ON i.matter_id = m.id
         WHERE i.company_id = ? AND i.status IN ('sent','partially_paid','overdue')
         AND CAST(i.balance AS REAL) > 0

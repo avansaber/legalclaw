@@ -2,12 +2,12 @@
 name: legalclaw
 version: 1.0.0
 description: Legal Practice Management -- matters, time & billing, trust accounting, documents, calendar, conflicts, compliance. 69 actions across 7 domains with IOLTA trust accounting, CLE compliance tracking, conflict checking, and profitability reporting. Built on ERPClaw foundation.
-author: AvanSaber / Nikhil Jathar
-homepage: https://www.legalclaw.ai
+author: AvanSaber
+homepage: https://github.com/avansaber/legalclaw
 source: https://github.com/avansaber/legalclaw
 tier: 4
 category: legal
-requires: [erpclaw-setup]
+requires: [erpclaw]
 database: ~/.openclaw/erpclaw/data.sqlite
 user-invocable: true
 tags: [legalclaw, legal, law, matter, case, client, attorney, billing, trust, iolta, escrow, invoice, time-entry, expense, document, deadline, calendar, conflict, bar, cle, compliance, profitability, litigation, corporate]
@@ -27,7 +27,7 @@ All financial data uses Decimal precision. Trust accounts enforce balance suffic
 ## Security Model
 
 - **Local-only**: All data stored in `~/.openclaw/erpclaw/data.sqlite`
-- **No credentials required**: Uses erpclaw_lib shared library (installed by erpclaw-setup)
+- **No credentials required**: Uses erpclaw_lib shared library (installed by erpclaw)
 - **Zero network calls**: No external API calls, no telemetry, no cloud dependencies
 - **SQL injection safe**: All queries use parameterized statements
 - **Trust accounting safeguards**: Disbursements check sufficient balance, all transactions recorded
@@ -43,7 +43,7 @@ deposition, hearing, trial, invoice, billing, opposing counsel.
 
 If the database does not exist or you see "no such table" errors:
 ```
-python3 {baseDir}/../erpclaw-setup/scripts/db_query.py --action initialize-database
+python3 {baseDir}/../erpclaw/scripts/erpclaw-setup/db_query.py --action initialize-database
 python3 {baseDir}/init_db.py
 python3 {baseDir}/scripts/db_query.py --action status
 ```
@@ -194,10 +194,12 @@ For all actions: `python3 {baseDir}/scripts/db_query.py --action <action> [flags
 
 ## Technical Details (Tier 3)
 
-**Tables owned (16):** legalclaw_client, legalclaw_matter, legalclaw_matter_party, legalclaw_time_entry, legalclaw_expense, legalclaw_invoice, legalclaw_trust_account, legalclaw_trust_transaction, legalclaw_document, legalclaw_calendar_event, legalclaw_deadline, legalclaw_conflict_check, legalclaw_conflict_waiver, legalclaw_bar_admission, legalclaw_cle_record
+**Tables owned (16):** legalclaw_client_ext (FKs to core customer), legalclaw_matter, legalclaw_matter_party, legalclaw_time_entry, legalclaw_expense, legalclaw_invoice (with sales_invoice_id FK to core), legalclaw_trust_account, legalclaw_trust_transaction, legalclaw_document, legalclaw_calendar_event, legalclaw_deadline, legalclaw_conflict_check, legalclaw_conflict_waiver, legalclaw_bar_admission, legalclaw_cle_record
 
 **Script:** `scripts/db_query.py` routes to 7 domain modules: matters.py, timebilling.py, trust.py, documents.py, calendar.py, conflicts.py, compliance.py
 
+**Cross-skill integration:** `generate-invoice` creates a real `sales_invoice` via erpclaw-selling (cross_skill.create_invoice). `record-payment` creates a `payment_entry` via erpclaw-payments (cross_skill.create_payment). `send-invoice` submits the linked sales invoice. All cross-skill calls are gracefully degraded -- if selling/payments modules are not installed, the legal invoice still works standalone.
+
 **Data conventions:** Money = TEXT (Python Decimal), IDs = TEXT (UUID4), Dates = TEXT (ISO 8601), Booleans = INTEGER (0/1), Time = 6-minute increments (0.1 hours)
 
-**Shared library:** erpclaw_lib (get_connection, ok/err, row_to_dict, get_next_name, audit, to_decimal, round_currency, check_required_tables)
+**Shared library:** erpclaw_lib (get_connection, ok/err, row_to_dict, get_next_name, audit, to_decimal, round_currency, check_required_tables, cross_skill)

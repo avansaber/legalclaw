@@ -16,6 +16,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.gl_posting import insert_gl_entries
 
     ENTITY_PREFIXES.setdefault("legalclaw_trust_account", "LTRS-")
 except ImportError:
@@ -64,6 +65,21 @@ def add_trust_account(conn, args):
     account_type = getattr(args, "account_type", None) or "iolta"
     _validate_enum(account_type, VALID_ACCOUNT_TYPES, "account-type")
 
+    # GL account linkage (optional — enables double-entry trust posting)
+    gl_account_id = getattr(args, "gl_account_id", None)
+    trust_liability_account_id = getattr(args, "trust_liability_account_id", None)
+    interest_income_account_id = getattr(args, "interest_income_account_id", None)
+
+    # Validate referenced GL accounts exist
+    for acct_id, label in [
+        (gl_account_id, "--gl-account-id"),
+        (trust_liability_account_id, "--trust-liability-account-id"),
+        (interest_income_account_id, "--interest-income-account-id"),
+    ]:
+        if acct_id:
+            if not conn.execute("SELECT id FROM account WHERE id = ?", (acct_id,)).fetchone():
+                err(f"{label} account {acct_id} not found in chart of accounts")
+
     ta_id = str(uuid.uuid4())
     ns = get_next_name(conn, "legalclaw_trust_account", company_id=args.company_id)
     now = _now_iso()
@@ -71,18 +87,25 @@ def add_trust_account(conn, args):
     conn.execute("""
         INSERT INTO legalclaw_trust_account (
             id, naming_series, name, bank_name, account_number,
-            account_type, current_balance, company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?)
+            account_type, current_balance,
+            gl_account_id, trust_liability_account_id, interest_income_account_id,
+            company_id, created_at, updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         ta_id, ns, name,
         getattr(args, "bank_name", None),
         getattr(args, "account_number", None),
-        account_type, "0", args.company_id, now, now,
+        account_type, "0",
+        gl_account_id, trust_liability_account_id, interest_income_account_id,
+        args.company_id, now, now,
     ))
     audit(conn, "legalclaw_trust_account", ta_id, "legal-add-trust-account", args.company_id)
     conn.commit()
     ok({"id": ta_id, "naming_series": ns, "name": name, "account_type": account_type,
-        "current_balance": "0"})
+        "current_balance": "0",
+        "gl_account_id": gl_account_id,
+        "trust_liability_account_id": trust_liability_account_id,
+        "interest_income_account_id": interest_income_account_id})
 
 
 # ---------------------------------------------------------------------------
@@ -157,23 +180,40 @@ def deposit_trust(conn, args):
         UPDATE legalclaw_trust_account SET current_balance = ?, updated_at = ? WHERE id = ?
     """, (str(new_balance), now, ta_id))
 
-    # Update matter trust_balance if matter specified
+    # Update matter trust_balance if matter specified (Decimal math in Python, not SQL CAST)
     if matter_id:
-        conn.execute("""
-            UPDATE legalclaw_matter
-            SET trust_balance = CAST(
-                CAST(trust_balance AS REAL) + ? AS TEXT
-            ), updated_at = ?
-            WHERE id = ?
-        """, (float(amount), now, matter_id))
+        matter_row = conn.execute("SELECT trust_balance FROM legalclaw_matter WHERE id = ?",
+                                  (matter_id,)).fetchone()
+        current_matter_balance = to_decimal(matter_row["trust_balance"] or "0")
+        new_matter_balance = current_matter_balance + amount
+        conn.execute("UPDATE legalclaw_matter SET trust_balance = ?, updated_at = ? WHERE id = ?",
+                     (str(new_matter_balance), now, matter_id))
+
+    # GL posting: DR Trust Bank (asset), CR Trust Liability (liability)
+    gl_entry_ids = []
+    if ta_row["gl_account_id"] and ta_row["trust_liability_account_id"]:
+        entries = [
+            {"account_id": ta_row["gl_account_id"], "debit": str(amount), "credit": "0"},
+            {"account_id": ta_row["trust_liability_account_id"], "debit": "0", "credit": str(amount)},
+        ]
+        gl_entry_ids = insert_gl_entries(
+            conn, entries, voucher_type="Trust Deposit",
+            voucher_id=txn_id, posting_date=transaction_date,
+            company_id=args.company_id,
+        )
+        conn.execute("UPDATE legalclaw_trust_transaction SET gl_entry_ids = ? WHERE id = ?",
+                     (",".join(gl_entry_ids), txn_id))
 
     audit(conn, "legalclaw_trust_transaction", txn_id, "legal-deposit-trust", args.company_id)
     conn.commit()
-    ok({
+    result = {
         "id": txn_id, "trust_account_id": ta_id, "transaction_type": "deposit",
         "amount": str(amount), "new_balance": str(new_balance),
         "matter_id": matter_id,
-    })
+    }
+    if gl_entry_ids:
+        result["gl_entry_ids"] = gl_entry_ids
+    ok(result)
 
 
 # ---------------------------------------------------------------------------
@@ -227,22 +267,40 @@ def disburse_trust(conn, args):
         UPDATE legalclaw_trust_account SET current_balance = ?, updated_at = ? WHERE id = ?
     """, (str(new_balance), now, ta_id))
 
+    # Update matter trust_balance if matter specified (Decimal math in Python, not SQL CAST)
     if matter_id:
-        conn.execute("""
-            UPDATE legalclaw_matter
-            SET trust_balance = CAST(
-                CAST(trust_balance AS REAL) - ? AS TEXT
-            ), updated_at = ?
-            WHERE id = ?
-        """, (float(amount), now, matter_id))
+        matter_row = conn.execute("SELECT trust_balance FROM legalclaw_matter WHERE id = ?",
+                                  (matter_id,)).fetchone()
+        current_matter_balance = to_decimal(matter_row["trust_balance"] or "0")
+        new_matter_balance = current_matter_balance - amount
+        conn.execute("UPDATE legalclaw_matter SET trust_balance = ?, updated_at = ? WHERE id = ?",
+                     (str(new_matter_balance), now, matter_id))
+
+    # GL posting: DR Trust Liability, CR Trust Bank (reverse of deposit)
+    gl_entry_ids = []
+    if ta_row["gl_account_id"] and ta_row["trust_liability_account_id"]:
+        entries = [
+            {"account_id": ta_row["trust_liability_account_id"], "debit": str(amount), "credit": "0"},
+            {"account_id": ta_row["gl_account_id"], "debit": "0", "credit": str(amount)},
+        ]
+        gl_entry_ids = insert_gl_entries(
+            conn, entries, voucher_type="Trust Disbursement",
+            voucher_id=txn_id, posting_date=transaction_date,
+            company_id=args.company_id,
+        )
+        conn.execute("UPDATE legalclaw_trust_transaction SET gl_entry_ids = ? WHERE id = ?",
+                     (",".join(gl_entry_ids), txn_id))
 
     audit(conn, "legalclaw_trust_transaction", txn_id, "legal-disburse-trust", args.company_id)
     conn.commit()
-    ok({
+    result = {
         "id": txn_id, "trust_account_id": ta_id, "transaction_type": "disbursement",
         "amount": str(amount), "payee": payee, "new_balance": str(new_balance),
         "matter_id": matter_id,
-    })
+    }
+    if gl_entry_ids:
+        result["gl_entry_ids"] = gl_entry_ids
+    ok(result)
 
 
 # ---------------------------------------------------------------------------
@@ -314,13 +372,35 @@ def transfer_trust(conn, args):
     conn.execute("UPDATE legalclaw_trust_account SET current_balance = ?, updated_at = ? WHERE id = ?",
                  (str(new_to), now, to_id))
 
+    # GL posting: DR Destination Trust Bank, CR Source Trust Bank (no liability change)
+    gl_entry_ids = []
+    if from_row["gl_account_id"] and to_row["gl_account_id"]:
+        entries = [
+            {"account_id": to_row["gl_account_id"], "debit": str(amount), "credit": "0"},
+            {"account_id": from_row["gl_account_id"], "debit": "0", "credit": str(amount)},
+        ]
+        # Use debit_id as the voucher — it's the source-side transaction record
+        gl_entry_ids = insert_gl_entries(
+            conn, entries, voucher_type="Trust Transfer",
+            voucher_id=debit_id, posting_date=transaction_date,
+            company_id=args.company_id,
+        )
+        gl_ids_str = ",".join(gl_entry_ids)
+        conn.execute("UPDATE legalclaw_trust_transaction SET gl_entry_ids = ? WHERE id = ?",
+                     (gl_ids_str, debit_id))
+        conn.execute("UPDATE legalclaw_trust_transaction SET gl_entry_ids = ? WHERE id = ?",
+                     (gl_ids_str, credit_id))
+
     audit(conn, "legalclaw_trust_account", from_id, "legal-transfer-trust", args.company_id)
     conn.commit()
-    ok({
+    result = {
         "from_account_id": from_id, "to_account_id": to_id,
         "amount": str(amount),
         "from_new_balance": str(new_from), "to_new_balance": str(new_to),
-    })
+    }
+    if gl_entry_ids:
+        result["gl_entry_ids"] = gl_entry_ids
+    ok(result)
 
 
 # ---------------------------------------------------------------------------
@@ -356,42 +436,47 @@ def trust_reconciliation(conn, args):
 
     book_balance = to_decimal(ta_row["current_balance"])
 
-    # Calculate balance from transactions
+    # Calculate balance from transactions (TEXT amounts, Decimal math in Python)
     txn_rows = conn.execute("""
-        SELECT transaction_type, CAST(amount AS REAL) as amt
+        SELECT transaction_type, amount
         FROM legalclaw_trust_transaction WHERE trust_account_id = ?
     """, (ta_id,)).fetchall()
 
-    deposits = sum(Decimal(str(r["amt"])) for r in txn_rows if r["transaction_type"] in ("deposit", "interest"))
-    withdrawals = sum(Decimal(str(r["amt"])) for r in txn_rows if r["transaction_type"] in ("disbursement", "fee"))
+    deposits = sum(to_decimal(r["amount"]) for r in txn_rows if r["transaction_type"] in ("deposit", "interest"))
+    withdrawals = sum(to_decimal(r["amount"]) for r in txn_rows if r["transaction_type"] in ("disbursement", "fee"))
 
     # For transfers: outgoing = debit, incoming = credit (both stored as "transfer")
     # We track them by description convention; for simplicity, use net of deposits - withdrawals
     calc_balance = deposits - withdrawals
 
-    # Per-matter breakdown
-    matter_rows = conn.execute("""
-        SELECT m.id, m.title,
-               SUM(CASE WHEN t.transaction_type IN ('deposit','interest')
-                   THEN CAST(t.amount AS REAL) ELSE 0 END) as matter_deposits,
-               SUM(CASE WHEN t.transaction_type IN ('disbursement','fee')
-                   THEN CAST(t.amount AS REAL) ELSE 0 END) as matter_withdrawals
+    # Per-matter breakdown (fetch raw TEXT amounts, aggregate in Python)
+    matter_txn_rows = conn.execute("""
+        SELECT t.matter_id, m.id as mid, m.title, t.transaction_type, t.amount
         FROM legalclaw_trust_transaction t
         LEFT JOIN legalclaw_matter m ON t.matter_id = m.id
         WHERE t.trust_account_id = ? AND t.matter_id IS NOT NULL
-        GROUP BY m.id
     """, (ta_id,)).fetchall()
 
+    # Aggregate per-matter in Python with Decimal
+    matter_data = {}
+    for row in matter_txn_rows:
+        mid = row["mid"]
+        if mid not in matter_data:
+            matter_data[mid] = {"title": row["title"], "deposits": Decimal("0"), "withdrawals": Decimal("0")}
+        amt = to_decimal(row["amount"])
+        if row["transaction_type"] in ("deposit", "interest"):
+            matter_data[mid]["deposits"] += amt
+        elif row["transaction_type"] in ("disbursement", "fee"):
+            matter_data[mid]["withdrawals"] += amt
+
     client_ledger = []
-    for mr in matter_rows:
-        dep = Decimal(str(mr["matter_deposits"] or 0))
-        wd = Decimal(str(mr["matter_withdrawals"] or 0))
+    for mid, md in matter_data.items():
         client_ledger.append({
-            "matter_id": mr["id"],
-            "title": mr["title"],
-            "deposits": str(dep),
-            "withdrawals": str(wd),
-            "balance": str(dep - wd),
+            "matter_id": mid,
+            "title": md["title"],
+            "deposits": str(md["deposits"]),
+            "withdrawals": str(md["withdrawals"]),
+            "balance": str(md["deposits"] - md["withdrawals"]),
         })
 
     client_total = sum(to_decimal(c["balance"]) for c in client_ledger)
@@ -416,14 +501,19 @@ def trust_reconciliation(conn, args):
 def trust_balance_report(conn, args):
     _validate_company(conn, args.company_id)
 
-    rows = conn.execute("""
-        SELECT m.id as matter_id, m.title, m.client_id, c.name as client_name,
+    # Fetch all matters with trust balances (filter non-zero in Python with Decimal)
+    all_rows = conn.execute("""
+        SELECT m.id as matter_id, m.title, m.client_id, cust.name as client_name,
                m.trust_balance
         FROM legalclaw_matter m
-        JOIN legalclaw_client c ON m.client_id = c.id
-        WHERE m.company_id = ? AND CAST(m.trust_balance AS REAL) != 0
-        ORDER BY c.name, m.title
+        JOIN legalclaw_client_ext ext ON m.client_id = ext.id
+        JOIN customer cust ON ext.customer_id = cust.id
+        WHERE m.company_id = ?
+        ORDER BY cust.name, m.title
     """, (args.company_id,)).fetchall()
+
+    # Filter out zero-balance matters using Decimal comparison (not SQL CAST)
+    rows = [r for r in all_rows if to_decimal(r["trust_balance"] or "0") != Decimal("0")]
 
     total = sum(to_decimal(r["trust_balance"]) for r in rows)
     ok({
@@ -469,12 +559,43 @@ def trust_interest_distribution(conn, args):
         UPDATE legalclaw_trust_account SET current_balance = ?, updated_at = ? WHERE id = ?
     """, (str(new_balance), now, ta_id))
 
+    # GL posting: DR Trust Bank (asset), CR Interest Income (revenue)
+    # For IOLTA, interest goes to state bar foundation, not the firm.
+    # The interest_income_account_id on the trust account controls where it posts.
+    gl_entry_ids = []
+    if ta_row["gl_account_id"] and ta_row["interest_income_account_id"]:
+        # Interest income is a P&L account — needs cost_center_id
+        cost_center_id = getattr(args, "cost_center_id", None)
+        if not cost_center_id:
+            # Try to find a default cost center for this company
+            cc_row = conn.execute(
+                "SELECT id FROM cost_center WHERE company_id = ? AND is_group = 0 LIMIT 1",
+                (args.company_id,),
+            ).fetchone()
+            if cc_row:
+                cost_center_id = cc_row["id"]
+        entries = [
+            {"account_id": ta_row["gl_account_id"], "debit": str(amount), "credit": "0"},
+            {"account_id": ta_row["interest_income_account_id"], "debit": "0", "credit": str(amount),
+             "cost_center_id": cost_center_id},
+        ]
+        gl_entry_ids = insert_gl_entries(
+            conn, entries, voucher_type="Trust Interest",
+            voucher_id=txn_id, posting_date=transaction_date,
+            company_id=args.company_id,
+        )
+        conn.execute("UPDATE legalclaw_trust_transaction SET gl_entry_ids = ? WHERE id = ?",
+                     (",".join(gl_entry_ids), txn_id))
+
     audit(conn, "legalclaw_trust_transaction", txn_id, "legal-trust-interest-distribution", args.company_id)
     conn.commit()
-    ok({
+    result = {
         "id": txn_id, "trust_account_id": ta_id, "transaction_type": "interest",
         "amount": str(amount), "new_balance": str(new_balance),
-    })
+    }
+    if gl_entry_ids:
+        result["gl_entry_ids"] = gl_entry_ids
+    ok(result)
 
 
 # ---------------------------------------------------------------------------

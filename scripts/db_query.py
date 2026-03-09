@@ -43,7 +43,7 @@ from compliance import ACTIONS as COMPLIANCE_ACTIONS
 # Merge all domain actions into one router
 # ---------------------------------------------------------------------------
 SKILL = "legalclaw"
-REQUIRED_TABLES = ["company", "legalclaw_client"]
+REQUIRED_TABLES = ["company", "customer", "legalclaw_client_ext"]
 
 ACTIONS = {}
 ACTIONS.update(MATTERS_ACTIONS)
@@ -124,6 +124,10 @@ def main():
     parser.add_argument("--bank-name")
     parser.add_argument("--account-number")
     parser.add_argument("--account-type")
+    parser.add_argument("--gl-account-id")
+    parser.add_argument("--trust-liability-account-id")
+    parser.add_argument("--interest-income-account-id")
+    parser.add_argument("--cost-center-id")
     parser.add_argument("--to-trust-account-id")
     parser.add_argument("--transaction-date")
     parser.add_argument("--transaction-type")

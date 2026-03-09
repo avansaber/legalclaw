@@ -52,12 +52,13 @@ def check_conflicts(conn, args):
     """, (f"%{search_name}%", args.company_id)).fetchall()
 
     client_matches = conn.execute("""
-        SELECT c.id, c.name, c.client_type,
+        SELECT ext.id, cust.name, ext.client_type,
                GROUP_CONCAT(m.title, '; ') as matter_titles
-        FROM legalclaw_client c
-        LEFT JOIN legalclaw_matter m ON c.id = m.client_id
-        WHERE c.name LIKE ? AND c.company_id = ?
-        GROUP BY c.id
+        FROM legalclaw_client_ext ext
+        JOIN customer cust ON ext.customer_id = cust.id
+        LEFT JOIN legalclaw_matter m ON ext.id = m.client_id
+        WHERE cust.name LIKE ? AND ext.company_id = ?
+        GROUP BY ext.id
     """, (f"%{search_name}%", args.company_id)).fetchall()
 
     matches_found = len(party_matches) + len(client_matches)

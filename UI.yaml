@@ -1,0 +1,132 @@
+ocui_version: "1.0"
+skill: legalclaw
+skill_version: "1.0.0"
+display_name: Legal Practice Management
+icon: scale
+color: "#1e3a5f"
+default_entity: matter
+
+domains:
+  - key: matters
+    label: Matters
+    entities: [client, matter, matter_party]
+  - key: timebilling
+    label: Time & Billing
+    entities: [time_entry, expense, invoice]
+  - key: trust
+    label: Trust Accounting
+    entities: [trust_account, trust_transaction]
+  - key: documents
+    label: Documents
+    entities: [legal_document, document_version]
+  - key: calendar
+    label: Calendar & Deadlines
+    entities: [calendar_event, deadline]
+  - key: conflicts
+    label: Conflicts
+    entities: [conflict_check, conflict_waiver]
+  - key: compliance
+    label: Compliance
+    entities: [bar_admission, cle_record]
+
+dashboard:
+  kpis:
+    - key: active_matters
+      label: "Active Matters"
+      type: count
+      action: legal-list-matters
+      filter: { matter-status: open }
+      severity: success
+      icon: briefcase
+      drill_action: legal-list-matters
+      drill_filter: { matter-status: open }
+    - key: total_clients
+      label: "Clients"
+      type: count
+      action: legal-list-clients
+      icon: users
+      drill_action: legal-list-clients
+    - key: pending_invoices
+      label: "Pending Invoices"
+      type: count
+      action: legal-list-invoices
+      filter: { invoice-status: draft }
+      severity: warning
+      icon: file-text
+      drill_action: legal-list-invoices
+      drill_filter: { invoice-status: draft }
+    - key: upcoming_deadlines
+      label: "Upcoming Deadlines"
+      type: count
+      action: legal-list-deadlines
+      filter: { is-completed: 0 }
+      severity: warning
+      icon: clock
+      drill_action: legal-list-deadlines
+      drill_filter: { is-completed: 0 }
+    - key: trust_accounts
+      label: "Trust Accounts"
+      type: count
+      action: legal-list-trust-accounts
+      icon: landmark
+      drill_action: legal-list-trust-accounts
+  quick_actions:
+    - action: legal-add-client
+      label: "New Client"
+      icon: user-plus
+    - action: legal-add-matter
+      label: "New Matter"
+      icon: briefcase
+    - action: legal-add-time-entry
+      label: "Log Time"
+      icon: clock
+    - action: legal-generate-invoice
+      label: "Generate Invoice"
+      icon: file-text
+    - action: legal-deposit-trust
+      label: "Trust Deposit"
+      icon: landmark
+    - action: legal-check-conflicts
+      label: "Conflict Check"
+      icon: shield
+
+workflows:
+  - after: legal-add-client
+    suggest:
+      - action: legal-add-matter
+        label: "Open a matter"
+        pass: { client-id: id }
+      - action: legal-check-conflicts
+        label: "Run conflict check"
+        pass: { search-name: name }
+  - after: legal-add-matter
+    suggest:
+      - action: legal-add-time-entry
+        label: "Log time"
+        pass: { matter-id: id }
+      - action: legal-add-deadline
+        label: "Set a deadline"
+        pass: { matter-id: id }
+      - action: legal-add-matter-party
+        label: "Add a party"
+        pass: { matter-id: id }
+  - after: legal-add-time-entry
+    suggest:
+      - action: legal-generate-invoice
+        label: "Generate invoice"
+        pass: { matter-id: matter_id }
+  - after: legal-generate-invoice
+    suggest:
+      - action: legal-send-invoice
+        label: "Send invoice"
+        pass: { invoice-id: id }
+  - after: legal-send-invoice
+    suggest:
+      - action: legal-record-payment
+        label: "Record payment"
+        pass: { invoice-id: id }
+  - after: legal-close-matter
+    suggest:
+      - action: legal-generate-invoice
+        label: "Generate final invoice"
+        pass: { matter-id: id }

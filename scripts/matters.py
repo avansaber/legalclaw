@@ -164,7 +164,7 @@ def update_client(conn, args):
         core_args.update(core_updates)
         db_path = getattr(args, "db_path", None)
         try:
-            call_skill_action("erpclaw-selling", "update-customer",
+            call_skill_action("erpclaw", "update-customer",
                               args=core_args, db_path=db_path)
         except CrossSkillError as e:
             err(f"Failed to update core customer: {e}")

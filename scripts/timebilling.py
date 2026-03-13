@@ -650,7 +650,7 @@ def record_payment(conn, args):
                 "party_id": customer_id,
                 "paid_amount": str(payment_amount),
                 "company_id": company_id,
-                "remarks": f"LegalClaw payment for invoice {row.get('naming_series', inv_id)}",
+                "remarks": f"LegalClaw payment for invoice {row['naming_series'] if row['naming_series'] else inv_id}",
                 "db_path": db_path,
             }
             # Link to the sales invoice if one exists

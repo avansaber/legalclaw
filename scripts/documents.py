@@ -14,6 +14,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
     ENTITY_PREFIXES.setdefault("legalclaw_document", "LDOC-")
 except ImportError:
@@ -34,14 +35,14 @@ VALID_DOCUMENT_STATUSES = ("draft", "review", "final", "filed", "archived")
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field("id")).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
 def _validate_document(conn, doc_id):
     if not doc_id:
         err("--document-id is required")
-    row = conn.execute("SELECT * FROM legalclaw_document WHERE id = ?", (doc_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("legalclaw_document")).select(Table("legalclaw_document").star).where(Field("id") == P()).get_sql(), (doc_id,)).fetchone()
     if not row:
         err(f"Document {doc_id} not found")
     return row
@@ -67,20 +68,15 @@ def add_legal_document(conn, args):
 
     matter_id = getattr(args, "matter_id", None)
     if matter_id:
-        if not conn.execute("SELECT id FROM legalclaw_matter WHERE id = ?", (matter_id,)).fetchone():
+        if not conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("id")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone():
             err(f"Matter {matter_id} not found")
 
     doc_id = str(uuid.uuid4())
     ns = get_next_name(conn, "legalclaw_document", company_id=args.company_id)
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO legalclaw_document (
-            id, naming_series, matter_id, title, document_type, file_name,
-            content, version, status, filed_date, court_reference,
-            company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("legalclaw_document", {"id": P(), "naming_series": P(), "matter_id": P(), "title": P(), "document_type": P(), "file_name": P(), "content": P(), "version": P(), "status": P(), "filed_date": P(), "court_reference": P(), "company_id": P(), "created_at": P(), "updated_at": P()})
+    conn.execute(sql, (
         doc_id, ns, matter_id, title, document_type,
         getattr(args, "file_name", None),
         getattr(args, "content", None),
@@ -324,7 +320,7 @@ def document_index(conn, args):
     matter_id = getattr(args, "matter_id", None)
     if not matter_id:
         err("--matter-id is required")
-    if not conn.execute("SELECT id FROM legalclaw_matter WHERE id = ?", (matter_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("id")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone():
         err(f"Matter {matter_id} not found")
 
     rows = conn.execute("""

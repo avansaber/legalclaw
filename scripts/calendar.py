@@ -13,6 +13,7 @@ try:
     from erpclaw_lib.db import get_connection
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 except ImportError:
     pass
 
@@ -32,7 +33,7 @@ VALID_DEADLINE_TYPES = ("filing", "response", "discovery", "statute", "appeal", 
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field("id")).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -60,7 +61,7 @@ def add_calendar_event(conn, args):
 
     matter_id = getattr(args, "matter_id", None)
     if matter_id:
-        if not conn.execute("SELECT id FROM legalclaw_matter WHERE id = ?", (matter_id,)).fetchone():
+        if not conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("id")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone():
             err(f"Matter {matter_id} not found")
 
     is_critical = 0
@@ -78,13 +79,8 @@ def add_calendar_event(conn, args):
 
     event_id = str(uuid.uuid4())
     now = _now_iso()
-    conn.execute("""
-        INSERT INTO legalclaw_calendar_event (
-            id, matter_id, title, event_type, event_date, event_time,
-            location, description, reminder_days, is_critical, status,
-            company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("legalclaw_calendar_event", {"id": P(), "matter_id": P(), "title": P(), "event_type": P(), "event_date": P(), "event_time": P(), "location": P(), "description": P(), "reminder_days": P(), "is_critical": P(), "status": P(), "company_id": P(), "created_at": P(), "updated_at": P()})
+    conn.execute(sql, (
         event_id, matter_id, event_title, event_type, event_date,
         getattr(args, "event_time", None),
         getattr(args, "location", None),
@@ -108,7 +104,7 @@ def update_calendar_event(conn, args):
     event_id = getattr(args, "event_id", None)
     if not event_id:
         err("--event-id is required")
-    row = conn.execute("SELECT * FROM legalclaw_calendar_event WHERE id = ?", (event_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("legalclaw_calendar_event")).select(Table("legalclaw_calendar_event").star).where(Field("id") == P()).get_sql(), (event_id,)).fetchone()
     if not row:
         err(f"Calendar event {event_id} not found")
 
@@ -192,7 +188,7 @@ def complete_event(conn, args):
     event_id = getattr(args, "event_id", None)
     if not event_id:
         err("--event-id is required")
-    row = conn.execute("SELECT * FROM legalclaw_calendar_event WHERE id = ?", (event_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("legalclaw_calendar_event")).select(Table("legalclaw_calendar_event").star).where(Field("id") == P()).get_sql(), (event_id,)).fetchone()
     if not row:
         err(f"Calendar event {event_id} not found")
     if row["status"] == "completed":
@@ -216,7 +212,7 @@ def add_deadline(conn, args):
     matter_id = getattr(args, "matter_id", None)
     if not matter_id:
         err("--matter-id is required")
-    if not conn.execute("SELECT id FROM legalclaw_matter WHERE id = ?", (matter_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("id")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone():
         err(f"Matter {matter_id} not found")
 
     deadline_title = getattr(args, "deadline_title", None)
@@ -237,13 +233,8 @@ def add_deadline(conn, args):
 
     dl_id = str(uuid.uuid4())
     now = _now_iso()
-    conn.execute("""
-        INSERT INTO legalclaw_deadline (
-            id, matter_id, title, deadline_type, due_date, is_court_imposed,
-            assigned_to, is_completed, completed_date, notes,
-            company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("legalclaw_deadline", {"id": P(), "matter_id": P(), "title": P(), "deadline_type": P(), "due_date": P(), "is_court_imposed": P(), "assigned_to": P(), "is_completed": P(), "completed_date": P(), "notes": P(), "company_id": P(), "created_at": P(), "updated_at": P()})
+    conn.execute(sql, (
         dl_id, matter_id, deadline_title, deadline_type, due_date,
         is_court_imposed,
         getattr(args, "assigned_to", None),
@@ -267,7 +258,7 @@ def update_deadline(conn, args):
     dl_id = getattr(args, "deadline_id", None)
     if not dl_id:
         err("--deadline-id is required")
-    row = conn.execute("SELECT * FROM legalclaw_deadline WHERE id = ?", (dl_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("legalclaw_deadline")).select(Table("legalclaw_deadline").star).where(Field("id") == P()).get_sql(), (dl_id,)).fetchone()
     if not row:
         err(f"Deadline {dl_id} not found")
 
@@ -337,7 +328,7 @@ def complete_deadline(conn, args):
     dl_id = getattr(args, "deadline_id", None)
     if not dl_id:
         err("--deadline-id is required")
-    row = conn.execute("SELECT * FROM legalclaw_deadline WHERE id = ?", (dl_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("legalclaw_deadline")).select(Table("legalclaw_deadline").star).where(Field("id") == P()).get_sql(), (dl_id,)).fetchone()
     if not row:
         err(f"Deadline {dl_id} not found")
     if row["is_completed"]:

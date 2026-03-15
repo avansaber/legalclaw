@@ -16,6 +16,7 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
     ENTITY_PREFIXES.setdefault("legalclaw_bar_admission", "LBAR-")
 except ImportError:
@@ -34,7 +35,7 @@ DEFAULT_DB_PATH = os.path.expanduser("~/.openclaw/erpclaw/data.sqlite")
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field("id")).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -67,13 +68,8 @@ def add_bar_admission(conn, args):
     ns = get_next_name(conn, "legalclaw_bar_admission", company_id=args.company_id)
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO legalclaw_bar_admission (
-            id, attorney_name, bar_number, jurisdiction, admission_date,
-            expiry_date, status, cle_hours_required, cle_hours_completed,
-            company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("legalclaw_bar_admission", {"id": P(), "attorney_name": P(), "bar_number": P(), "jurisdiction": P(), "admission_date": P(), "expiry_date": P(), "status": P(), "cle_hours_required": P(), "cle_hours_completed": P(), "company_id": P(), "created_at": P(), "updated_at": P()})
+    conn.execute(sql, (
         ba_id, attorney_name,
         getattr(args, "bar_number", None),
         jurisdiction,
@@ -97,7 +93,7 @@ def update_bar_admission(conn, args):
     ba_id = getattr(args, "bar_admission_id", None)
     if not ba_id:
         err("--bar-admission-id is required")
-    row = conn.execute("SELECT * FROM legalclaw_bar_admission WHERE id = ?", (ba_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("legalclaw_bar_admission")).select(Table("legalclaw_bar_admission").star).where(Field("id") == P()).get_sql(), (ba_id,)).fetchone()
     if not row:
         err(f"Bar admission {ba_id} not found")
 
@@ -188,20 +184,14 @@ def add_cle_record(conn, args):
 
     bar_admission_id = getattr(args, "bar_admission_id", None)
     if bar_admission_id:
-        ba_row = conn.execute("SELECT * FROM legalclaw_bar_admission WHERE id = ?",
-                              (bar_admission_id,)).fetchone()
+        ba_row = conn.execute(Q.from_(Table("legalclaw_bar_admission")).select(Table("legalclaw_bar_admission").star).where(Field("id") == P()).get_sql(), (bar_admission_id,)).fetchone()
         if not ba_row:
             err(f"Bar admission {bar_admission_id} not found")
 
     cle_id = str(uuid.uuid4())
     now = _now_iso()
-    conn.execute("""
-        INSERT INTO legalclaw_cle_record (
-            id, attorney_name, bar_admission_id, course_name, provider,
-            completion_date, hours, category, certificate_number,
-            company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("legalclaw_cle_record", {"id": P(), "attorney_name": P(), "bar_admission_id": P(), "course_name": P(), "provider": P(), "completion_date": P(), "hours": P(), "category": P(), "certificate_number": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql, (
         cle_id, attorney_name, bar_admission_id, course_name,
         getattr(args, "cle_provider", None),
         completion_date, hours, category,

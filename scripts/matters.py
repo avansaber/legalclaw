@@ -22,6 +22,7 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.cross_skill import create_customer, CrossSkillError
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
     ENTITY_PREFIXES.setdefault("legalclaw_client_ext", "LCLI-")
     ENTITY_PREFIXES.setdefault("legalclaw_matter", "LMTR-")
@@ -52,21 +53,21 @@ VALID_PARTY_TYPES = (
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field("id")).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
 def _validate_client(conn, client_id):
     if not client_id:
         err("--client-id is required")
-    if not conn.execute("SELECT id FROM legalclaw_client_ext WHERE id = ?", (client_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("legalclaw_client_ext")).select(Field("id")).where(Field("id") == P()).get_sql(), (client_id,)).fetchone():
         err(f"Client {client_id} not found")
 
 
 def _validate_matter(conn, matter_id):
     if not matter_id:
         err("--matter-id is required")
-    row = conn.execute("SELECT id FROM legalclaw_matter WHERE id = ?", (matter_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("id")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone()
     if not row:
         err(f"Matter {matter_id} not found")
     return row
@@ -116,12 +117,8 @@ def add_client(conn, args):
     ext_id = str(uuid.uuid4())
     ns = get_next_name(conn, "legalclaw_client_ext", company_id=args.company_id)
     now = _now_iso()
-    conn.execute("""
-        INSERT INTO legalclaw_client_ext (
-            id, naming_series, customer_id, client_type, billing_rate,
-            is_active, company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("legalclaw_client_ext", {"id": P(), "naming_series": P(), "customer_id": P(), "client_type": P(), "billing_rate": P(), "is_active": P(), "company_id": P(), "created_at": P(), "updated_at": P()})
+    conn.execute(sql, (
         ext_id, ns, customer_id, client_type,
         billing_rate, 1, args.company_id, now, now,
     ))
@@ -283,14 +280,8 @@ def add_matter(conn, args):
     now = _now_iso()
     opened_date = getattr(args, "opened_date", None) or datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    conn.execute("""
-        INSERT INTO legalclaw_matter (
-            id, naming_series, client_id, matter_number, title, practice_area,
-            description, lead_attorney, billing_method, billing_rate, budget,
-            billed_amount, collected_amount, trust_balance, opened_date,
-            status, notes, company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("legalclaw_matter", {"id": P(), "naming_series": P(), "client_id": P(), "matter_number": P(), "title": P(), "practice_area": P(), "description": P(), "lead_attorney": P(), "billing_method": P(), "billing_rate": P(), "budget": P(), "billed_amount": P(), "collected_amount": P(), "trust_balance": P(), "opened_date": P(), "status": P(), "notes": P(), "company_id": P(), "created_at": P(), "updated_at": P()})
+    conn.execute(sql, (
         matter_id, ns, client_id, ns, title, practice_area,
         getattr(args, "description", None),
         getattr(args, "lead_attorney", None),
@@ -361,7 +352,7 @@ def update_matter(conn, args):
 def get_matter(conn, args):
     matter_id = getattr(args, "matter_id", None)
     _validate_matter(conn, matter_id)
-    row = conn.execute("SELECT * FROM legalclaw_matter WHERE id = ?", (matter_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("legalclaw_matter")).select(Table("legalclaw_matter").star).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone()
     ok(row_to_dict(row))
 
 
@@ -412,12 +403,8 @@ def add_matter_party(conn, args):
     _validate_enum(party_type, VALID_PARTY_TYPES, "party-type")
 
     party_id = str(uuid.uuid4())
-    conn.execute("""
-        INSERT INTO legalclaw_matter_party (
-            id, matter_id, party_name, party_type, role, contact_info,
-            notes, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("legalclaw_matter_party", {"id": P(), "matter_id": P(), "party_name": P(), "party_type": P(), "role": P(), "contact_info": P(), "notes": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql, (
         party_id, matter_id, party_name, party_type,
         getattr(args, "role", None),
         getattr(args, "contact_info", None),
@@ -456,7 +443,7 @@ def close_matter(conn, args):
     matter_id = getattr(args, "matter_id", None)
     _validate_matter(conn, matter_id)
 
-    row = conn.execute("SELECT status FROM legalclaw_matter WHERE id = ?", (matter_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("status")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone()
     current_status = row["status"] if row else None
     if current_status == "closed":
         err(f"Matter {matter_id} is already closed")
@@ -481,7 +468,7 @@ def reopen_matter(conn, args):
     matter_id = getattr(args, "matter_id", None)
     _validate_matter(conn, matter_id)
 
-    row = conn.execute("SELECT status FROM legalclaw_matter WHERE id = ?", (matter_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("status")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone()
     current_status = row["status"] if row else None
     if current_status != "closed":
         err(f"Matter {matter_id} is not closed (current status: {current_status})")
@@ -505,7 +492,7 @@ def matter_summary(conn, args):
     matter_id = getattr(args, "matter_id", None)
     _validate_matter(conn, matter_id)
 
-    matter = conn.execute("SELECT * FROM legalclaw_matter WHERE id = ?", (matter_id,)).fetchone()
+    matter = conn.execute(Q.from_(Table("legalclaw_matter")).select(Table("legalclaw_matter").star).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone()
     m = row_to_dict(matter)
 
     # Time entries summary

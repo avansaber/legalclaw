@@ -20,6 +20,7 @@ try:
     from erpclaw_lib.cross_skill import (
         create_invoice, submit_invoice, create_payment, CrossSkillError,
     )
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
     ENTITY_PREFIXES.setdefault("legalclaw_invoice", "LINV-")
 except ImportError:
@@ -46,15 +47,14 @@ VALID_INVOICE_FORMATS = ("standard", "ledes")
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field("id")).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
 def _validate_matter(conn, matter_id):
     if not matter_id:
         err("--matter-id is required")
-    row = conn.execute("SELECT id, client_id, company_id, billing_rate FROM legalclaw_matter WHERE id = ?",
-                       (matter_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("id"), Field("client_id"), Field("company_id"), Field("billing_rate")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone()
     if not row:
         err(f"Matter {matter_id} not found")
     return row
@@ -73,9 +73,7 @@ def _round_to_tenth(hours_str):
 
 def _lookup_customer_id(conn, client_id):
     """Resolve legalclaw_client_ext.id -> customer.id for cross_skill calls."""
-    row = conn.execute(
-        "SELECT customer_id FROM legalclaw_client_ext WHERE id = ?", (client_id,)
-    ).fetchone()
+    row = conn.execute(Q.from_(Table("legalclaw_client_ext")).select(Field("customer_id")).where(Field("id") == P()).get_sql(), (client_id,)).fetchone()
     if not row:
         return None
     return row["customer_id"]
@@ -131,13 +129,8 @@ def add_time_entry(conn, args):
 
     te_id = str(uuid.uuid4())
     now = _now_iso()
-    conn.execute("""
-        INSERT INTO legalclaw_time_entry (
-            id, matter_id, attorney, entry_date, hours, rate, amount,
-            description, utbms_code, is_billable, is_billed, invoice_id,
-            company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("legalclaw_time_entry", {"id": P(), "matter_id": P(), "attorney": P(), "entry_date": P(), "hours": P(), "rate": P(), "amount": P(), "description": P(), "utbms_code": P(), "is_billable": P(), "is_billed": P(), "invoice_id": P(), "company_id": P(), "created_at": P(), "updated_at": P()})
+    conn.execute(sql, (
         te_id, matter_id, attorney, entry_date, hours, rate, amount,
         te_description,
         getattr(args, "utbms_code", None),
@@ -160,7 +153,7 @@ def update_time_entry(conn, args):
     te_id = getattr(args, "time_entry_id", None)
     if not te_id:
         err("--time-entry-id is required")
-    row = conn.execute("SELECT * FROM legalclaw_time_entry WHERE id = ?", (te_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("legalclaw_time_entry")).select(Table("legalclaw_time_entry").star).where(Field("id") == P()).get_sql(), (te_id,)).fetchone()
     if not row:
         err(f"Time entry {te_id} not found")
     if row["is_billed"]:
@@ -269,13 +262,8 @@ def add_expense(conn, args):
         is_billable = 0
 
     exp_id = str(uuid.uuid4())
-    conn.execute("""
-        INSERT INTO legalclaw_expense (
-            id, matter_id, expense_date, amount, category, description,
-            is_billable, is_billed, invoice_id, receipt_reference,
-            company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("legalclaw_expense", {"id": P(), "matter_id": P(), "expense_date": P(), "amount": P(), "category": P(), "description": P(), "is_billable": P(), "is_billed": P(), "invoice_id": P(), "receipt_reference": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql, (
         exp_id, matter_id, expense_date, amount, category,
         getattr(args, "expense_description", None),
         is_billable, 0, None,
@@ -294,7 +282,7 @@ def update_expense(conn, args):
     exp_id = getattr(args, "expense_id", None)
     if not exp_id:
         err("--expense-id is required")
-    row = conn.execute("SELECT * FROM legalclaw_expense WHERE id = ?", (exp_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("legalclaw_expense")).select(Table("legalclaw_expense").star).where(Field("id") == P()).get_sql(), (exp_id,)).fetchone()
     if not row:
         err(f"Expense {exp_id} not found")
     if row["is_billed"]:
@@ -394,9 +382,7 @@ def generate_invoice(conn, args):
     total_amount = time_amount + expense_amount
 
     # Look up matter title for invoice line item description
-    matter_full = conn.execute(
-        "SELECT title FROM legalclaw_matter WHERE id = ?", (matter_id,)
-    ).fetchone()
+    matter_full = conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("title")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone()
     matter_title = matter_full["title"] if matter_full else "Legal Services"
 
     inv_id = str(uuid.uuid4())
@@ -453,13 +439,8 @@ def generate_invoice(conn, args):
             # Legal invoice is still created as the authoritative record.
             cross_skill_error = str(e)
 
-    conn.execute("""
-        INSERT INTO legalclaw_invoice (
-            id, naming_series, matter_id, client_id, invoice_date, due_date,
-            time_amount, expense_amount, total_amount, paid_amount, balance,
-            format, status, sales_invoice_id, notes, company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("legalclaw_invoice", {"id": P(), "naming_series": P(), "matter_id": P(), "client_id": P(), "invoice_date": P(), "due_date": P(), "time_amount": P(), "expense_amount": P(), "total_amount": P(), "paid_amount": P(), "balance": P(), "format": P(), "status": P(), "sales_invoice_id": P(), "notes": P(), "company_id": P(), "created_at": P(), "updated_at": P()})
+    conn.execute(sql, (
         inv_id, ns, matter_id, client_id, invoice_date, due_date,
         str(time_amount), str(expense_amount), str(total_amount),
         "0", str(total_amount),
@@ -483,9 +464,7 @@ def generate_invoice(conn, args):
         """, (inv_id, exp["id"]))
 
     # Update matter billed_amount (Decimal-safe addition)
-    current_billed = conn.execute(
-        "SELECT billed_amount FROM legalclaw_matter WHERE id = ?", (matter_id,)
-    ).fetchone()
+    current_billed = conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("billed_amount")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone()
     new_billed = to_decimal(current_billed["billed_amount"]) + total_amount
     conn.execute("""
         UPDATE legalclaw_matter SET billed_amount = ?, updated_at = ? WHERE id = ?
@@ -517,17 +496,13 @@ def get_invoice(conn, args):
     inv_id = getattr(args, "invoice_id", None)
     if not inv_id:
         err("--invoice-id is required")
-    row = conn.execute("SELECT * FROM legalclaw_invoice WHERE id = ?", (inv_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("legalclaw_invoice")).select(Table("legalclaw_invoice").star).where(Field("id") == P()).get_sql(), (inv_id,)).fetchone()
     if not row:
         err(f"Invoice {inv_id} not found")
 
     # Include line items
-    time_entries = conn.execute(
-        "SELECT * FROM legalclaw_time_entry WHERE invoice_id = ?", (inv_id,)
-    ).fetchall()
-    expenses = conn.execute(
-        "SELECT * FROM legalclaw_expense WHERE invoice_id = ?", (inv_id,)
-    ).fetchall()
+    time_entries = conn.execute(Q.from_(Table("legalclaw_time_entry")).select(Table("legalclaw_time_entry").star).where(Field("invoice_id") == P()).get_sql(), (inv_id,)).fetchall()
+    expenses = conn.execute(Q.from_(Table("legalclaw_expense")).select(Table("legalclaw_expense").star).where(Field("invoice_id") == P()).get_sql(), (inv_id,)).fetchall()
 
     result = row_to_dict(row)
     result["time_entries"] = [row_to_dict(r) for r in time_entries]
@@ -569,7 +544,7 @@ def send_invoice(conn, args):
     inv_id = getattr(args, "invoice_id", None)
     if not inv_id:
         err("--invoice-id is required")
-    row = conn.execute("SELECT * FROM legalclaw_invoice WHERE id = ?", (inv_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("legalclaw_invoice")).select(Table("legalclaw_invoice").star).where(Field("id") == P()).get_sql(), (inv_id,)).fetchone()
     if not row:
         err(f"Invoice {inv_id} not found")
     if row["status"] not in ("draft",):
@@ -608,7 +583,7 @@ def record_payment(conn, args):
     inv_id = getattr(args, "invoice_id", None)
     if not inv_id:
         err("--invoice-id is required")
-    row = conn.execute("SELECT * FROM legalclaw_invoice WHERE id = ?", (inv_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("legalclaw_invoice")).select(Table("legalclaw_invoice").star).where(Field("id") == P()).get_sql(), (inv_id,)).fetchone()
     if not row:
         err(f"Invoice {inv_id} not found")
     if row["status"] in ("paid", "written_off"):
@@ -675,9 +650,7 @@ def record_payment(conn, args):
 
     # Update matter collected_amount (Decimal-safe addition)
     matter_id = row["matter_id"]
-    current_collected = conn.execute(
-        "SELECT collected_amount FROM legalclaw_matter WHERE id = ?", (matter_id,)
-    ).fetchone()
+    current_collected = conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("collected_amount")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone()
     new_collected = to_decimal(current_collected["collected_amount"]) + payment_amount
     conn.execute("""
         UPDATE legalclaw_matter SET collected_amount = ?, updated_at = ? WHERE id = ?
@@ -708,7 +681,7 @@ def write_off_invoice(conn, args):
     inv_id = getattr(args, "invoice_id", None)
     if not inv_id:
         err("--invoice-id is required")
-    row = conn.execute("SELECT * FROM legalclaw_invoice WHERE id = ?", (inv_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("legalclaw_invoice")).select(Table("legalclaw_invoice").star).where(Field("id") == P()).get_sql(), (inv_id,)).fetchone()
     if not row:
         err(f"Invoice {inv_id} not found")
     if row["status"] in ("paid", "written_off"):

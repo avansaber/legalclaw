@@ -17,6 +17,7 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.gl_posting import insert_gl_entries
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 
     ENTITY_PREFIXES.setdefault("legalclaw_trust_account", "LTRS-")
 except ImportError:
@@ -34,15 +35,14 @@ VALID_TRANSACTION_TYPES = ("deposit", "disbursement", "transfer", "interest", "f
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field("id")).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
 def _validate_trust_account(conn, trust_account_id):
     if not trust_account_id:
         err("--trust-account-id is required")
-    row = conn.execute("SELECT * FROM legalclaw_trust_account WHERE id = ?",
-                       (trust_account_id,)).fetchone()
+    row = conn.execute(Q.from_(Table("legalclaw_trust_account")).select(Table("legalclaw_trust_account").star).where(Field("id") == P()).get_sql(), (trust_account_id,)).fetchone()
     if not row:
         err(f"Trust account {trust_account_id} not found")
     return row
@@ -77,21 +77,15 @@ def add_trust_account(conn, args):
         (interest_income_account_id, "--interest-income-account-id"),
     ]:
         if acct_id:
-            if not conn.execute("SELECT id FROM account WHERE id = ?", (acct_id,)).fetchone():
+            if not conn.execute(Q.from_(Table("account")).select(Field("id")).where(Field("id") == P()).get_sql(), (acct_id,)).fetchone():
                 err(f"{label} account {acct_id} not found in chart of accounts")
 
     ta_id = str(uuid.uuid4())
     ns = get_next_name(conn, "legalclaw_trust_account", company_id=args.company_id)
     now = _now_iso()
 
-    conn.execute("""
-        INSERT INTO legalclaw_trust_account (
-            id, naming_series, name, bank_name, account_number,
-            account_type, current_balance,
-            gl_account_id, trust_liability_account_id, interest_income_account_id,
-            company_id, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("legalclaw_trust_account", {"id": P(), "naming_series": P(), "name": P(), "bank_name": P(), "account_number": P(), "account_type": P(), "current_balance": P(), "gl_account_id": P(), "trust_liability_account_id": P(), "interest_income_account_id": P(), "company_id": P(), "created_at": P(), "updated_at": P()})
+    conn.execute(sql, (
         ta_id, ns, name,
         getattr(args, "bank_name", None),
         getattr(args, "account_number", None),
@@ -153,19 +147,15 @@ def deposit_trust(conn, args):
 
     matter_id = getattr(args, "matter_id", None)
     if matter_id:
-        if not conn.execute("SELECT id FROM legalclaw_matter WHERE id = ?", (matter_id,)).fetchone():
+        if not conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("id")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone():
             err(f"Matter {matter_id} not found")
 
     transaction_date = getattr(args, "transaction_date", None) or datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     txn_id = str(uuid.uuid4())
     now = _now_iso()
-    conn.execute("""
-        INSERT INTO legalclaw_trust_transaction (
-            id, trust_account_id, matter_id, transaction_type, transaction_date,
-            amount, reference, payee, description, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("legalclaw_trust_transaction", {"id": P(), "trust_account_id": P(), "matter_id": P(), "transaction_type": P(), "transaction_date": P(), "amount": P(), "reference": P(), "payee": P(), "description": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql, (
         txn_id, ta_id, matter_id, "deposit", transaction_date,
         str(amount),
         getattr(args, "reference", None),
@@ -182,8 +172,7 @@ def deposit_trust(conn, args):
 
     # Update matter trust_balance if matter specified (Decimal math in Python, not SQL CAST)
     if matter_id:
-        matter_row = conn.execute("SELECT trust_balance FROM legalclaw_matter WHERE id = ?",
-                                  (matter_id,)).fetchone()
+        matter_row = conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("trust_balance")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone()
         current_matter_balance = to_decimal(matter_row["trust_balance"] or "0")
         new_matter_balance = current_matter_balance + amount
         conn.execute("UPDATE legalclaw_matter SET trust_balance = ?, updated_at = ? WHERE id = ?",
@@ -237,7 +226,7 @@ def disburse_trust(conn, args):
 
     matter_id = getattr(args, "matter_id", None)
     if matter_id:
-        if not conn.execute("SELECT id FROM legalclaw_matter WHERE id = ?", (matter_id,)).fetchone():
+        if not conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("id")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone():
             err(f"Matter {matter_id} not found")
 
     payee = getattr(args, "payee", None)
@@ -248,12 +237,8 @@ def disburse_trust(conn, args):
 
     txn_id = str(uuid.uuid4())
     now = _now_iso()
-    conn.execute("""
-        INSERT INTO legalclaw_trust_transaction (
-            id, trust_account_id, matter_id, transaction_type, transaction_date,
-            amount, reference, payee, description, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("legalclaw_trust_transaction", {"id": P(), "trust_account_id": P(), "matter_id": P(), "transaction_type": P(), "transaction_date": P(), "amount": P(), "reference": P(), "payee": P(), "description": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql, (
         txn_id, ta_id, matter_id, "disbursement", transaction_date,
         str(amount),
         getattr(args, "reference", None),
@@ -269,8 +254,7 @@ def disburse_trust(conn, args):
 
     # Update matter trust_balance if matter specified (Decimal math in Python, not SQL CAST)
     if matter_id:
-        matter_row = conn.execute("SELECT trust_balance FROM legalclaw_matter WHERE id = ?",
-                                  (matter_id,)).fetchone()
+        matter_row = conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("trust_balance")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone()
         current_matter_balance = to_decimal(matter_row["trust_balance"] or "0")
         new_matter_balance = current_matter_balance - amount
         conn.execute("UPDATE legalclaw_matter SET trust_balance = ?, updated_at = ? WHERE id = ?",
@@ -314,7 +298,7 @@ def transfer_trust(conn, args):
     to_id = getattr(args, "to_trust_account_id", None)
     if not to_id:
         err("--to-trust-account-id is required")
-    to_row = conn.execute("SELECT * FROM legalclaw_trust_account WHERE id = ?", (to_id,)).fetchone()
+    to_row = conn.execute(Q.from_(Table("legalclaw_trust_account")).select(Table("legalclaw_trust_account").star).where(Field("id") == P()).get_sql(), (to_id,)).fetchone()
     if not to_row:
         err(f"Destination trust account {to_id} not found")
 
@@ -334,12 +318,8 @@ def transfer_trust(conn, args):
 
     # Debit source
     debit_id = str(uuid.uuid4())
-    conn.execute("""
-        INSERT INTO legalclaw_trust_transaction (
-            id, trust_account_id, matter_id, transaction_type, transaction_date,
-            amount, reference, payee, description, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("legalclaw_trust_transaction", {"id": P(), "trust_account_id": P(), "matter_id": P(), "transaction_type": P(), "transaction_date": P(), "amount": P(), "reference": P(), "payee": P(), "description": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql, (
         debit_id, from_id, None, "transfer", transaction_date,
         str(amount),
         getattr(args, "reference", None),
@@ -350,12 +330,8 @@ def transfer_trust(conn, args):
 
     # Credit destination
     credit_id = str(uuid.uuid4())
-    conn.execute("""
-        INSERT INTO legalclaw_trust_transaction (
-            id, trust_account_id, matter_id, transaction_type, transaction_date,
-            amount, reference, payee, description, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("legalclaw_trust_transaction", {"id": P(), "trust_account_id": P(), "matter_id": P(), "transaction_type": P(), "transaction_date": P(), "amount": P(), "reference": P(), "payee": P(), "description": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql, (
         credit_id, to_id, None, "transfer", transaction_date,
         str(amount),
         getattr(args, "reference", None),
@@ -542,12 +518,8 @@ def trust_interest_distribution(conn, args):
 
     txn_id = str(uuid.uuid4())
     now = _now_iso()
-    conn.execute("""
-        INSERT INTO legalclaw_trust_transaction (
-            id, trust_account_id, matter_id, transaction_type, transaction_date,
-            amount, reference, payee, description, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("legalclaw_trust_transaction", {"id": P(), "trust_account_id": P(), "matter_id": P(), "transaction_type": P(), "transaction_date": P(), "amount": P(), "reference": P(), "payee": P(), "description": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql, (
         txn_id, ta_id, None, "interest", transaction_date,
         str(amount), getattr(args, "reference", None), None,
         "Interest distribution",

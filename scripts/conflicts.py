@@ -13,6 +13,7 @@ try:
     from erpclaw_lib.db import get_connection
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
 except ImportError:
     pass
 
@@ -25,7 +26,7 @@ _now_iso = lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute("SELECT id FROM company WHERE id = ?", (company_id,)).fetchone():
+    if not conn.execute(Q.from_(Table("company")).select(Field("id")).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -75,12 +76,8 @@ def check_conflicts(conn, args):
     check_id = str(uuid.uuid4())
     now = _now_iso()
     import json
-    conn.execute("""
-        INSERT INTO legalclaw_conflict_check (
-            id, search_name, checked_date, checked_by, matches_found,
-            match_details, result, matter_id, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("legalclaw_conflict_check", {"id": P(), "search_name": P(), "checked_date": P(), "checked_by": P(), "matches_found": P(), "match_details": P(), "result": P(), "matter_id": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql, (
         check_id, search_name,
         datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         checked_by, matches_found,
@@ -106,8 +103,7 @@ def add_conflict_waiver(conn, args):
     conflict_check_id = getattr(args, "conflict_check_id", None)
     if not conflict_check_id:
         err("--conflict-check-id is required")
-    check_row = conn.execute("SELECT * FROM legalclaw_conflict_check WHERE id = ?",
-                             (conflict_check_id,)).fetchone()
+    check_row = conn.execute(Q.from_(Table("legalclaw_conflict_check")).select(Table("legalclaw_conflict_check").star).where(Field("id") == P()).get_sql(), (conflict_check_id,)).fetchone()
     if not check_row:
         err(f"Conflict check {conflict_check_id} not found")
 
@@ -119,12 +115,8 @@ def add_conflict_waiver(conn, args):
     now = _now_iso()
     matter_id = getattr(args, "matter_id", None)
 
-    conn.execute("""
-        INSERT INTO legalclaw_conflict_waiver (
-            id, conflict_check_id, matter_id, waived_by, waiver_date,
-            reason, company_id, created_at
-        ) VALUES (?,?,?,?,?,?,?,?)
-    """, (
+    sql, _ = insert_row("legalclaw_conflict_waiver", {"id": P(), "conflict_check_id": P(), "matter_id": P(), "waived_by": P(), "waiver_date": P(), "reason": P(), "company_id": P(), "created_at": P()})
+    conn.execute(sql, (
         waiver_id, conflict_check_id, matter_id, waived_by,
         datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         getattr(args, "waiver_reason", None),

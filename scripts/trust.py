@@ -17,7 +17,10 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.gl_posting import insert_gl_entries
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+    from erpclaw_lib.query import (
+        Q, P, Table, Field, fn, Order, LiteralValue,
+        insert_row, update_row, dynamic_update,
+    )
 
     ENTITY_PREFIXES.setdefault("legalclaw_trust_account", "LTRS-")
 except ImportError:
@@ -28,6 +31,16 @@ _now_iso = lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 VALID_ACCOUNT_TYPES = ("iolta", "escrow", "retainer", "other")
 VALID_TRANSACTION_TYPES = ("deposit", "disbursement", "transfer", "interest", "fee")
 
+# ── Table aliases ──
+_company = Table("company")
+_account = Table("account")
+_ta = Table("legalclaw_trust_account")
+_txn = Table("legalclaw_trust_transaction")
+_matter = Table("legalclaw_matter")
+_ext = Table("legalclaw_client_ext")
+_cust = Table("customer")
+_cc = Table("cost_center")
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -35,14 +48,16 @@ VALID_TRANSACTION_TYPES = ("deposit", "disbursement", "transfer", "interest", "f
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute(Q.from_(Table("company")).select(Field("id")).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
+    q = Q.from_(_company).select(_company.id).where(_company.id == P())
+    if not conn.execute(q.get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
 def _validate_trust_account(conn, trust_account_id):
     if not trust_account_id:
         err("--trust-account-id is required")
-    row = conn.execute(Q.from_(Table("legalclaw_trust_account")).select(Table("legalclaw_trust_account").star).where(Field("id") == P()).get_sql(), (trust_account_id,)).fetchone()
+    q = Q.from_(_ta).select(_ta.star).where(_ta.id == P())
+    row = conn.execute(q.get_sql(), (trust_account_id,)).fetchone()
     if not row:
         err(f"Trust account {trust_account_id} not found")
     return row
@@ -77,7 +92,8 @@ def add_trust_account(conn, args):
         (interest_income_account_id, "--interest-income-account-id"),
     ]:
         if acct_id:
-            if not conn.execute(Q.from_(Table("account")).select(Field("id")).where(Field("id") == P()).get_sql(), (acct_id,)).fetchone():
+            q = Q.from_(_account).select(_account.id).where(_account.id == P())
+            if not conn.execute(q.get_sql(), (acct_id,)).fetchone():
                 err(f"{label} account {acct_id} not found in chart of accounts")
 
     ta_id = str(uuid.uuid4())
@@ -115,18 +131,22 @@ def get_trust_account(conn, args):
 # 3. list-trust-accounts
 # ---------------------------------------------------------------------------
 def list_trust_accounts(conn, args):
-    sql = "SELECT * FROM legalclaw_trust_account WHERE 1=1"
+    conditions = []
     params = []
     if args.company_id:
-        sql += " AND company_id = ?"
+        conditions.append(_ta.company_id == P())
         params.append(args.company_id)
     account_type = getattr(args, "account_type", None)
     if account_type:
-        sql += " AND account_type = ?"
+        conditions.append(_ta.account_type == P())
         params.append(account_type)
-    sql += " ORDER BY name ASC LIMIT ? OFFSET ?"
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(sql, params).fetchall()
+
+    q = Q.from_(_ta).select(_ta.star)
+    for cond in conditions:
+        q = q.where(cond)
+    q = q.orderby(_ta.name, order=Order.asc).limit(P()).offset(P())
+
+    rows = conn.execute(q.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({"trust_accounts": [row_to_dict(r) for r in rows], "count": len(rows)})
 
 
@@ -147,7 +167,8 @@ def deposit_trust(conn, args):
 
     matter_id = getattr(args, "matter_id", None)
     if matter_id:
-        if not conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("id")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone():
+        mq = Q.from_(_matter).select(_matter.id).where(_matter.id == P())
+        if not conn.execute(mq.get_sql(), (matter_id,)).fetchone():
             err(f"Matter {matter_id} not found")
 
     transaction_date = getattr(args, "transaction_date", None) or datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -166,17 +187,21 @@ def deposit_trust(conn, args):
 
     # Update trust account balance
     new_balance = to_decimal(ta_row["current_balance"]) + amount
-    conn.execute("""
-        UPDATE legalclaw_trust_account SET current_balance = ?, updated_at = ? WHERE id = ?
-    """, (str(new_balance), now, ta_id))
+    sql_u, params_u = dynamic_update("legalclaw_trust_account",
+        {"current_balance": str(new_balance), "updated_at": now},
+        where={"id": ta_id})
+    conn.execute(sql_u, params_u)
 
     # Update matter trust_balance if matter specified (Decimal math in Python, not SQL CAST)
     if matter_id:
-        matter_row = conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("trust_balance")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone()
+        mb_q = Q.from_(_matter).select(_matter.trust_balance).where(_matter.id == P())
+        matter_row = conn.execute(mb_q.get_sql(), (matter_id,)).fetchone()
         current_matter_balance = to_decimal(matter_row["trust_balance"] or "0")
         new_matter_balance = current_matter_balance + amount
-        conn.execute("UPDATE legalclaw_matter SET trust_balance = ?, updated_at = ? WHERE id = ?",
-                     (str(new_matter_balance), now, matter_id))
+        sql_m, params_m = dynamic_update("legalclaw_matter",
+            {"trust_balance": str(new_matter_balance), "updated_at": now},
+            where={"id": matter_id})
+        conn.execute(sql_m, params_m)
 
     # GL posting: DR Trust Bank (asset), CR Trust Liability (liability)
     gl_entry_ids = []
@@ -190,8 +215,10 @@ def deposit_trust(conn, args):
             voucher_id=txn_id, posting_date=transaction_date,
             company_id=args.company_id,
         )
-        conn.execute("UPDATE legalclaw_trust_transaction SET gl_entry_ids = ? WHERE id = ?",
-                     (",".join(gl_entry_ids), txn_id))
+        sql_gl, params_gl = dynamic_update("legalclaw_trust_transaction",
+            {"gl_entry_ids": ",".join(gl_entry_ids)},
+            where={"id": txn_id})
+        conn.execute(sql_gl, params_gl)
 
     audit(conn, "legalclaw_trust_transaction", txn_id, "legal-deposit-trust", args.company_id)
     conn.commit()
@@ -226,7 +253,8 @@ def disburse_trust(conn, args):
 
     matter_id = getattr(args, "matter_id", None)
     if matter_id:
-        if not conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("id")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone():
+        mq = Q.from_(_matter).select(_matter.id).where(_matter.id == P())
+        if not conn.execute(mq.get_sql(), (matter_id,)).fetchone():
             err(f"Matter {matter_id} not found")
 
     payee = getattr(args, "payee", None)
@@ -248,17 +276,21 @@ def disburse_trust(conn, args):
     ))
 
     new_balance = current_balance - amount
-    conn.execute("""
-        UPDATE legalclaw_trust_account SET current_balance = ?, updated_at = ? WHERE id = ?
-    """, (str(new_balance), now, ta_id))
+    sql_u, params_u = dynamic_update("legalclaw_trust_account",
+        {"current_balance": str(new_balance), "updated_at": now},
+        where={"id": ta_id})
+    conn.execute(sql_u, params_u)
 
     # Update matter trust_balance if matter specified (Decimal math in Python, not SQL CAST)
     if matter_id:
-        matter_row = conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("trust_balance")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone()
+        mb_q = Q.from_(_matter).select(_matter.trust_balance).where(_matter.id == P())
+        matter_row = conn.execute(mb_q.get_sql(), (matter_id,)).fetchone()
         current_matter_balance = to_decimal(matter_row["trust_balance"] or "0")
         new_matter_balance = current_matter_balance - amount
-        conn.execute("UPDATE legalclaw_matter SET trust_balance = ?, updated_at = ? WHERE id = ?",
-                     (str(new_matter_balance), now, matter_id))
+        sql_m, params_m = dynamic_update("legalclaw_matter",
+            {"trust_balance": str(new_matter_balance), "updated_at": now},
+            where={"id": matter_id})
+        conn.execute(sql_m, params_m)
 
     # GL posting: DR Trust Liability, CR Trust Bank (reverse of deposit)
     gl_entry_ids = []
@@ -272,8 +304,10 @@ def disburse_trust(conn, args):
             voucher_id=txn_id, posting_date=transaction_date,
             company_id=args.company_id,
         )
-        conn.execute("UPDATE legalclaw_trust_transaction SET gl_entry_ids = ? WHERE id = ?",
-                     (",".join(gl_entry_ids), txn_id))
+        sql_gl, params_gl = dynamic_update("legalclaw_trust_transaction",
+            {"gl_entry_ids": ",".join(gl_entry_ids)},
+            where={"id": txn_id})
+        conn.execute(sql_gl, params_gl)
 
     audit(conn, "legalclaw_trust_transaction", txn_id, "legal-disburse-trust", args.company_id)
     conn.commit()
@@ -298,7 +332,8 @@ def transfer_trust(conn, args):
     to_id = getattr(args, "to_trust_account_id", None)
     if not to_id:
         err("--to-trust-account-id is required")
-    to_row = conn.execute(Q.from_(Table("legalclaw_trust_account")).select(Table("legalclaw_trust_account").star).where(Field("id") == P()).get_sql(), (to_id,)).fetchone()
+    to_q = Q.from_(_ta).select(_ta.star).where(_ta.id == P())
+    to_row = conn.execute(to_q.get_sql(), (to_id,)).fetchone()
     if not to_row:
         err(f"Destination trust account {to_id} not found")
 
@@ -343,10 +378,15 @@ def transfer_trust(conn, args):
     new_from = from_balance - amount
     new_to = to_decimal(to_row["current_balance"]) + amount
 
-    conn.execute("UPDATE legalclaw_trust_account SET current_balance = ?, updated_at = ? WHERE id = ?",
-                 (str(new_from), now, from_id))
-    conn.execute("UPDATE legalclaw_trust_account SET current_balance = ?, updated_at = ? WHERE id = ?",
-                 (str(new_to), now, to_id))
+    sql_from, p_from = dynamic_update("legalclaw_trust_account",
+        {"current_balance": str(new_from), "updated_at": now},
+        where={"id": from_id})
+    conn.execute(sql_from, p_from)
+
+    sql_to, p_to = dynamic_update("legalclaw_trust_account",
+        {"current_balance": str(new_to), "updated_at": now},
+        where={"id": to_id})
+    conn.execute(sql_to, p_to)
 
     # GL posting: DR Destination Trust Bank, CR Source Trust Bank (no liability change)
     gl_entry_ids = []
@@ -362,10 +402,12 @@ def transfer_trust(conn, args):
             company_id=args.company_id,
         )
         gl_ids_str = ",".join(gl_entry_ids)
-        conn.execute("UPDATE legalclaw_trust_transaction SET gl_entry_ids = ? WHERE id = ?",
-                     (gl_ids_str, debit_id))
-        conn.execute("UPDATE legalclaw_trust_transaction SET gl_entry_ids = ? WHERE id = ?",
-                     (gl_ids_str, credit_id))
+        sql_g1, p_g1 = dynamic_update("legalclaw_trust_transaction",
+            {"gl_entry_ids": gl_ids_str}, where={"id": debit_id})
+        conn.execute(sql_g1, p_g1)
+        sql_g2, p_g2 = dynamic_update("legalclaw_trust_transaction",
+            {"gl_entry_ids": gl_ids_str}, where={"id": credit_id})
+        conn.execute(sql_g2, p_g2)
 
     audit(conn, "legalclaw_trust_account", from_id, "legal-transfer-trust", args.company_id)
     conn.commit()
@@ -383,23 +425,27 @@ def transfer_trust(conn, args):
 # 7. list-trust-transactions
 # ---------------------------------------------------------------------------
 def list_trust_transactions(conn, args):
-    sql = "SELECT * FROM legalclaw_trust_transaction WHERE 1=1"
+    conditions = []
     params = []
     ta_id = getattr(args, "trust_account_id", None)
     if ta_id:
-        sql += " AND trust_account_id = ?"
+        conditions.append(_txn.trust_account_id == P())
         params.append(ta_id)
     matter_id = getattr(args, "matter_id", None)
     if matter_id:
-        sql += " AND matter_id = ?"
+        conditions.append(_txn.matter_id == P())
         params.append(matter_id)
     transaction_type = getattr(args, "transaction_type", None)
     if transaction_type:
-        sql += " AND transaction_type = ?"
+        conditions.append(_txn.transaction_type == P())
         params.append(transaction_type)
-    sql += " ORDER BY transaction_date DESC, created_at DESC LIMIT ? OFFSET ?"
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(sql, params).fetchall()
+
+    q = Q.from_(_txn).select(_txn.star)
+    for cond in conditions:
+        q = q.where(cond)
+    q = q.orderby(_txn.transaction_date, order=Order.desc).orderby(_txn.created_at, order=Order.desc).limit(P()).offset(P())
+
+    rows = conn.execute(q.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({"transactions": [row_to_dict(r) for r in rows], "count": len(rows)})
 
 
@@ -413,10 +459,12 @@ def trust_reconciliation(conn, args):
     book_balance = to_decimal(ta_row["current_balance"])
 
     # Calculate balance from transactions (TEXT amounts, Decimal math in Python)
-    txn_rows = conn.execute("""
-        SELECT transaction_type, amount
-        FROM legalclaw_trust_transaction WHERE trust_account_id = ?
-    """, (ta_id,)).fetchall()
+    txn_q = (
+        Q.from_(_txn)
+        .select(_txn.transaction_type, _txn.amount)
+        .where(_txn.trust_account_id == P())
+    )
+    txn_rows = conn.execute(txn_q.get_sql(), (ta_id,)).fetchall()
 
     deposits = sum(to_decimal(r["amount"]) for r in txn_rows if r["transaction_type"] in ("deposit", "interest"))
     withdrawals = sum(to_decimal(r["amount"]) for r in txn_rows if r["transaction_type"] in ("disbursement", "fee"))
@@ -426,12 +474,17 @@ def trust_reconciliation(conn, args):
     calc_balance = deposits - withdrawals
 
     # Per-matter breakdown (fetch raw TEXT amounts, aggregate in Python)
-    matter_txn_rows = conn.execute("""
-        SELECT t.matter_id, m.id as mid, m.title, t.transaction_type, t.amount
-        FROM legalclaw_trust_transaction t
-        LEFT JOIN legalclaw_matter m ON t.matter_id = m.id
-        WHERE t.trust_account_id = ? AND t.matter_id IS NOT NULL
-    """, (ta_id,)).fetchall()
+    matter_txn_q = (
+        Q.from_(_txn)
+        .left_join(_matter).on(_txn.matter_id == _matter.id)
+        .select(
+            _txn.matter_id, _matter.id.as_("mid"), _matter.title,
+            _txn.transaction_type, _txn.amount,
+        )
+        .where(_txn.trust_account_id == P())
+        .where(_txn.matter_id.isnotnull())
+    )
+    matter_txn_rows = conn.execute(matter_txn_q.get_sql(), (ta_id,)).fetchall()
 
     # Aggregate per-matter in Python with Decimal
     matter_data = {}
@@ -478,15 +531,18 @@ def trust_balance_report(conn, args):
     _validate_company(conn, args.company_id)
 
     # Fetch all matters with trust balances (filter non-zero in Python with Decimal)
-    all_rows = conn.execute("""
-        SELECT m.id as matter_id, m.title, m.client_id, cust.name as client_name,
-               m.trust_balance
-        FROM legalclaw_matter m
-        JOIN legalclaw_client_ext ext ON m.client_id = ext.id
-        JOIN customer cust ON ext.customer_id = cust.id
-        WHERE m.company_id = ?
-        ORDER BY cust.name, m.title
-    """, (args.company_id,)).fetchall()
+    q = (
+        Q.from_(_matter)
+        .join(_ext).on(_matter.client_id == _ext.id)
+        .join(_cust).on(_ext.customer_id == _cust.id)
+        .select(
+            _matter.id.as_("matter_id"), _matter.title, _matter.client_id,
+            _cust.name.as_("client_name"), _matter.trust_balance,
+        )
+        .where(_matter.company_id == P())
+        .orderby(_cust.name).orderby(_matter.title)
+    )
+    all_rows = conn.execute(q.get_sql(), (args.company_id,)).fetchall()
 
     # Filter out zero-balance matters using Decimal comparison (not SQL CAST)
     rows = [r for r in all_rows if to_decimal(r["trust_balance"] or "0") != Decimal("0")]
@@ -527,9 +583,10 @@ def trust_interest_distribution(conn, args):
     ))
 
     new_balance = to_decimal(ta_row["current_balance"]) + amount
-    conn.execute("""
-        UPDATE legalclaw_trust_account SET current_balance = ?, updated_at = ? WHERE id = ?
-    """, (str(new_balance), now, ta_id))
+    sql_u, params_u = dynamic_update("legalclaw_trust_account",
+        {"current_balance": str(new_balance), "updated_at": now},
+        where={"id": ta_id})
+    conn.execute(sql_u, params_u)
 
     # GL posting: DR Trust Bank (asset), CR Interest Income (revenue)
     # For IOLTA, interest goes to state bar foundation, not the firm.
@@ -540,10 +597,14 @@ def trust_interest_distribution(conn, args):
         cost_center_id = getattr(args, "cost_center_id", None)
         if not cost_center_id:
             # Try to find a default cost center for this company
-            cc_row = conn.execute(
-                "SELECT id FROM cost_center WHERE company_id = ? AND is_group = 0 LIMIT 1",
-                (args.company_id,),
-            ).fetchone()
+            cc_q = (
+                Q.from_(_cc)
+                .select(_cc.id)
+                .where(_cc.company_id == P())
+                .where(_cc.is_group == 0)
+                .limit(1)
+            )
+            cc_row = conn.execute(cc_q.get_sql(), (args.company_id,)).fetchone()
             if cc_row:
                 cost_center_id = cc_row["id"]
         entries = [
@@ -556,8 +617,10 @@ def trust_interest_distribution(conn, args):
             voucher_id=txn_id, posting_date=transaction_date,
             company_id=args.company_id,
         )
-        conn.execute("UPDATE legalclaw_trust_transaction SET gl_entry_ids = ? WHERE id = ?",
-                     (",".join(gl_entry_ids), txn_id))
+        sql_gl, params_gl = dynamic_update("legalclaw_trust_transaction",
+            {"gl_entry_ids": ",".join(gl_entry_ids)},
+            where={"id": txn_id})
+        conn.execute(sql_gl, params_gl)
 
     audit(conn, "legalclaw_trust_transaction", txn_id, "legal-trust-interest-distribution", args.company_id)
     conn.commit()

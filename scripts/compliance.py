@@ -16,7 +16,10 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+    from erpclaw_lib.query import (
+        Q, P, Table, Field, fn, Order, LiteralValue,
+        insert_row, update_row, dynamic_update,
+    )
 
     ENTITY_PREFIXES.setdefault("legalclaw_bar_admission", "LBAR-")
 except ImportError:
@@ -28,6 +31,16 @@ VALID_BAR_STATUSES = ("active", "inactive", "suspended", "retired")
 VALID_CLE_CATEGORIES = ("general", "ethics", "professionalism", "diversity", "substance_abuse", "other")
 DEFAULT_DB_PATH = os.path.expanduser("~/.openclaw/erpclaw/data.sqlite")
 
+# ── Table aliases ──
+_company = Table("company")
+_ba = Table("legalclaw_bar_admission")
+_cle = Table("legalclaw_cle_record")
+_matter = Table("legalclaw_matter")
+_te = Table("legalclaw_time_entry")
+_expense = Table("legalclaw_expense")
+_ext = Table("legalclaw_client_ext")
+_cust = Table("customer")
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -35,7 +48,8 @@ DEFAULT_DB_PATH = os.path.expanduser("~/.openclaw/erpclaw/data.sqlite")
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute(Q.from_(Table("company")).select(Field("id")).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
+    q = Q.from_(_company).select(_company.id).where(_company.id == P())
+    if not conn.execute(q.get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -93,11 +107,13 @@ def update_bar_admission(conn, args):
     ba_id = getattr(args, "bar_admission_id", None)
     if not ba_id:
         err("--bar-admission-id is required")
-    row = conn.execute(Q.from_(Table("legalclaw_bar_admission")).select(Table("legalclaw_bar_admission").star).where(Field("id") == P()).get_sql(), (ba_id,)).fetchone()
+    q = Q.from_(_ba).select(_ba.star).where(_ba.id == P())
+    row = conn.execute(q.get_sql(), (ba_id,)).fetchone()
     if not row:
         err(f"Bar admission {ba_id} not found")
 
-    updates, params, changed = [], [], []
+    data = {}
+    changed = []
     for arg_name, col_name in {
         "attorney_name": "attorney_name", "bar_number": "bar_number",
         "jurisdiction": "jurisdiction", "admission_date": "admission_date",
@@ -107,24 +123,21 @@ def update_bar_admission(conn, args):
         if val is not None:
             if arg_name == "cle_hours_required":
                 to_decimal(val)
-            updates.append(f"{col_name} = ?")
-            params.append(val)
+            data[col_name] = val
             changed.append(col_name)
 
     admission_status = getattr(args, "admission_status", None)
     if admission_status:
         _validate_enum(admission_status, VALID_BAR_STATUSES, "admission-status")
-        updates.append("status = ?")
-        params.append(admission_status)
+        data["status"] = admission_status
         changed.append("status")
 
-    if not updates:
+    if not data:
         err("No fields to update")
 
-    updates.append("updated_at = ?")
-    params.append(_now_iso())
-    params.append(ba_id)
-    conn.execute(f"UPDATE legalclaw_bar_admission SET {', '.join(updates)} WHERE id = ?", params)
+    data["updated_at"] = _now_iso()
+    sql, params = dynamic_update("legalclaw_bar_admission", data, where={"id": ba_id})
+    conn.execute(sql, params)
     audit(conn, "legalclaw_bar_admission", ba_id, "legal-update-bar-admission",
           getattr(args, "company_id", None))
     conn.commit()
@@ -135,26 +148,30 @@ def update_bar_admission(conn, args):
 # 3. list-bar-admissions
 # ---------------------------------------------------------------------------
 def list_bar_admissions(conn, args):
-    sql = "SELECT * FROM legalclaw_bar_admission WHERE 1=1"
+    conditions = []
     params = []
     if args.company_id:
-        sql += " AND company_id = ?"
+        conditions.append(_ba.company_id == P())
         params.append(args.company_id)
     attorney_name = getattr(args, "attorney_name", None)
     if attorney_name:
-        sql += " AND attorney_name LIKE ?"
+        conditions.append(_ba.attorney_name.like(P()))
         params.append(f"%{attorney_name}%")
     admission_status = getattr(args, "admission_status", None)
     if admission_status:
-        sql += " AND status = ?"
+        conditions.append(_ba.status == P())
         params.append(admission_status)
     jurisdiction = getattr(args, "jurisdiction", None)
     if jurisdiction:
-        sql += " AND jurisdiction = ?"
+        conditions.append(_ba.jurisdiction == P())
         params.append(jurisdiction)
-    sql += " ORDER BY attorney_name ASC LIMIT ? OFFSET ?"
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(sql, params).fetchall()
+
+    q = Q.from_(_ba).select(_ba.star)
+    for cond in conditions:
+        q = q.where(cond)
+    q = q.orderby(_ba.attorney_name, order=Order.asc).limit(P()).offset(P())
+
+    rows = conn.execute(q.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({"bar_admissions": [row_to_dict(r) for r in rows], "count": len(rows)})
 
 
@@ -184,7 +201,8 @@ def add_cle_record(conn, args):
 
     bar_admission_id = getattr(args, "bar_admission_id", None)
     if bar_admission_id:
-        ba_row = conn.execute(Q.from_(Table("legalclaw_bar_admission")).select(Table("legalclaw_bar_admission").star).where(Field("id") == P()).get_sql(), (bar_admission_id,)).fetchone()
+        q = Q.from_(_ba).select(_ba.star).where(_ba.id == P())
+        ba_row = conn.execute(q.get_sql(), (bar_admission_id,)).fetchone()
         if not ba_row:
             err(f"Bar admission {bar_admission_id} not found")
 
@@ -201,13 +219,14 @@ def add_cle_record(conn, args):
 
     # Auto-update bar admission CLE hours if linked
     if bar_admission_id:
-        conn.execute("""
-            UPDATE legalclaw_bar_admission
-            SET cle_hours_completed = CAST(
-                CAST(cle_hours_completed AS REAL) + ? AS TEXT
-            ), updated_at = ?
-            WHERE id = ?
-        """, (float(to_decimal(hours)), now, bar_admission_id))
+        upd_q = (
+            Q.update(_ba)
+            .set(_ba.cle_hours_completed,
+                 LiteralValue("CAST(CAST(cle_hours_completed AS REAL) + ? AS TEXT)"))
+            .set(_ba.updated_at, P())
+            .where(_ba.id == P())
+        )
+        conn.execute(upd_q.get_sql(), (float(to_decimal(hours)), now, bar_admission_id))
 
     audit(conn, "legalclaw_cle_record", cle_id, "legal-add-cle-record", args.company_id)
     conn.commit()
@@ -221,26 +240,30 @@ def add_cle_record(conn, args):
 # 5. list-cle-records
 # ---------------------------------------------------------------------------
 def list_cle_records(conn, args):
-    sql = "SELECT * FROM legalclaw_cle_record WHERE 1=1"
+    conditions = []
     params = []
     if args.company_id:
-        sql += " AND company_id = ?"
+        conditions.append(_cle.company_id == P())
         params.append(args.company_id)
     attorney_name = getattr(args, "attorney_name", None)
     if attorney_name:
-        sql += " AND attorney_name LIKE ?"
+        conditions.append(_cle.attorney_name.like(P()))
         params.append(f"%{attorney_name}%")
     bar_admission_id = getattr(args, "bar_admission_id", None)
     if bar_admission_id:
-        sql += " AND bar_admission_id = ?"
+        conditions.append(_cle.bar_admission_id == P())
         params.append(bar_admission_id)
     cle_category = getattr(args, "cle_category", None)
     if cle_category:
-        sql += " AND category = ?"
+        conditions.append(_cle.category == P())
         params.append(cle_category)
-    sql += " ORDER BY completion_date DESC LIMIT ? OFFSET ?"
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(sql, params).fetchall()
+
+    q = Q.from_(_cle).select(_cle.star)
+    for cond in conditions:
+        q = q.where(cond)
+    q = q.orderby(_cle.completion_date, order=Order.desc).limit(P()).offset(P())
+
+    rows = conn.execute(q.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({"cle_records": [row_to_dict(r) for r in rows], "count": len(rows)})
 
 
@@ -250,13 +273,17 @@ def list_cle_records(conn, args):
 def cle_compliance_report(conn, args):
     _validate_company(conn, args.company_id)
 
-    admissions = conn.execute("""
-        SELECT id, attorney_name, jurisdiction, bar_number, status,
-               cle_hours_required, cle_hours_completed, expiry_date
-        FROM legalclaw_bar_admission
-        WHERE company_id = ? AND status = 'active'
-        ORDER BY attorney_name
-    """, (args.company_id,)).fetchall()
+    adm_q = (
+        Q.from_(_ba)
+        .select(
+            _ba.id, _ba.attorney_name, _ba.jurisdiction, _ba.bar_number,
+            _ba.status, _ba.cle_hours_required, _ba.cle_hours_completed, _ba.expiry_date,
+        )
+        .where(_ba.company_id == P())
+        .where(_ba.status == "active")
+        .orderby(_ba.attorney_name)
+    )
+    admissions = conn.execute(adm_q.get_sql(), (args.company_id,)).fetchall()
 
     attorneys = []
     non_compliant = 0
@@ -270,12 +297,14 @@ def cle_compliance_report(conn, args):
             non_compliant += 1
 
         # Get CLE breakdown by category
-        categories = conn.execute("""
-            SELECT category, SUM(CAST(hours AS REAL)) as total_hours
-            FROM legalclaw_cle_record
-            WHERE bar_admission_id = ? AND company_id = ?
-            GROUP BY category
-        """, (a["id"], args.company_id)).fetchall()
+        cat_q = (
+            Q.from_(_cle)
+            .select(_cle.category, LiteralValue("SUM(CAST(hours AS REAL))").as_("total_hours"))
+            .where(_cle.bar_admission_id == P())
+            .where(_cle.company_id == P())
+            .groupby(_cle.category)
+        )
+        categories = conn.execute(cat_q.get_sql(), (a["id"], args.company_id)).fetchall()
 
         attorneys.append({
             "attorney_name": a["attorney_name"],
@@ -305,30 +334,39 @@ def cle_compliance_report(conn, args):
 def matter_profitability_report(conn, args):
     _validate_company(conn, args.company_id)
 
-    matters = conn.execute("""
-        SELECT m.id, m.title, m.practice_area, m.billing_method,
-               m.status, m.billed_amount, m.collected_amount, m.budget,
-               cust.name as client_name
-        FROM legalclaw_matter m
-        JOIN legalclaw_client_ext ext ON m.client_id = ext.id
-        JOIN customer cust ON ext.customer_id = cust.id
-        WHERE m.company_id = ?
-        ORDER BY m.opened_date DESC
-    """, (args.company_id,)).fetchall()
+    m_q = (
+        Q.from_(_matter)
+        .join(_ext).on(_matter.client_id == _ext.id)
+        .join(_cust).on(_ext.customer_id == _cust.id)
+        .select(
+            _matter.id, _matter.title, _matter.practice_area, _matter.billing_method,
+            _matter.status, _matter.billed_amount, _matter.collected_amount, _matter.budget,
+            _cust.name.as_("client_name"),
+        )
+        .where(_matter.company_id == P())
+        .orderby(_matter.opened_date, order=Order.desc)
+    )
+    matters = conn.execute(m_q.get_sql(), (args.company_id,)).fetchall()
 
     results = []
     for m in matters:
         # Total time cost (hours * rate for all entries)
-        time_row = conn.execute("""
-            SELECT COALESCE(SUM(CAST(amount AS REAL)), 0) as revenue,
-                   COALESCE(SUM(CAST(hours AS REAL)), 0) as total_hours
-            FROM legalclaw_time_entry WHERE matter_id = ?
-        """, (m["id"],)).fetchone()
+        time_q = (
+            Q.from_(_te)
+            .select(
+                LiteralValue("COALESCE(SUM(CAST(amount AS REAL)), 0)").as_("revenue"),
+                LiteralValue("COALESCE(SUM(CAST(hours AS REAL)), 0)").as_("total_hours"),
+            )
+            .where(_te.matter_id == P())
+        )
+        time_row = conn.execute(time_q.get_sql(), (m["id"],)).fetchone()
 
-        expense_row = conn.execute("""
-            SELECT COALESCE(SUM(CAST(amount AS REAL)), 0) as total_expenses
-            FROM legalclaw_expense WHERE matter_id = ?
-        """, (m["id"],)).fetchone()
+        exp_q = (
+            Q.from_(_expense)
+            .select(LiteralValue("COALESCE(SUM(CAST(amount AS REAL)), 0)").as_("total_expenses"))
+            .where(_expense.matter_id == P())
+        )
+        expense_row = conn.execute(exp_q.get_sql(), (m["id"],)).fetchone()
 
         revenue = Decimal(str(time_row["revenue"]))
         expenses = Decimal(str(expense_row["total_expenses"]))
@@ -367,18 +405,21 @@ def matter_profitability_report(conn, args):
 def practice_area_analysis(conn, args):
     _validate_company(conn, args.company_id)
 
-    rows = conn.execute("""
-        SELECT m.practice_area,
-               COUNT(*) as matter_count,
-               SUM(CASE WHEN m.status = 'active' THEN 1 ELSE 0 END) as active_count,
-               SUM(CASE WHEN m.status = 'closed' THEN 1 ELSE 0 END) as closed_count,
-               SUM(CAST(m.billed_amount AS REAL)) as total_billed,
-               SUM(CAST(m.collected_amount AS REAL)) as total_collected
-        FROM legalclaw_matter m
-        WHERE m.company_id = ?
-        GROUP BY m.practice_area
-        ORDER BY total_billed DESC
-    """, (args.company_id,)).fetchall()
+    pa_q = (
+        Q.from_(_matter)
+        .select(
+            _matter.practice_area,
+            fn.Count("*").as_("matter_count"),
+            LiteralValue("SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END)").as_("active_count"),
+            LiteralValue("SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END)").as_("closed_count"),
+            LiteralValue("SUM(CAST(billed_amount AS REAL))").as_("total_billed"),
+            LiteralValue("SUM(CAST(collected_amount AS REAL))").as_("total_collected"),
+        )
+        .where(_matter.company_id == P())
+        .groupby(_matter.practice_area)
+        .orderby(LiteralValue("total_billed"), order=Order.desc)
+    )
+    rows = conn.execute(pa_q.get_sql(), (args.company_id,)).fetchall()
 
     areas = []
     for r in rows:
@@ -386,12 +427,14 @@ def practice_area_analysis(conn, args):
         collected = Decimal(str(r["total_collected"] or 0))
 
         # Get total hours for this practice area
-        hours_row = conn.execute("""
-            SELECT COALESCE(SUM(CAST(t.hours AS REAL)), 0) as total_hours
-            FROM legalclaw_time_entry t
-            JOIN legalclaw_matter m ON t.matter_id = m.id
-            WHERE m.practice_area = ? AND m.company_id = ?
-        """, (r["practice_area"], args.company_id)).fetchone()
+        hours_q = (
+            Q.from_(_te)
+            .join(_matter).on(_te.matter_id == _matter.id)
+            .select(LiteralValue("COALESCE(SUM(CAST(\"legalclaw_time_entry\".\"hours\" AS REAL)), 0)").as_("total_hours"))
+            .where(_matter.practice_area == P())
+            .where(_matter.company_id == P())
+        )
+        hours_row = conn.execute(hours_q.get_sql(), (r["practice_area"], args.company_id)).fetchone()
 
         areas.append({
             "practice_area": r["practice_area"],

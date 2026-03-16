@@ -14,7 +14,10 @@ try:
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+    from erpclaw_lib.query import (
+        Q, P, Table, Field, fn, Order, LiteralValue,
+        insert_row, update_row, dynamic_update,
+    )
 
     ENTITY_PREFIXES.setdefault("legalclaw_document", "LDOC-")
 except ImportError:
@@ -28,6 +31,12 @@ VALID_DOCUMENT_TYPES = (
 )
 VALID_DOCUMENT_STATUSES = ("draft", "review", "final", "filed", "archived")
 
+# ── Table aliases ──
+_company = Table("company")
+_matter = Table("legalclaw_matter")
+_doc = Table("legalclaw_document")
+_audit = Table("audit_log")
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -35,14 +44,16 @@ VALID_DOCUMENT_STATUSES = ("draft", "review", "final", "filed", "archived")
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute(Q.from_(Table("company")).select(Field("id")).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
+    q = Q.from_(_company).select(_company.id).where(_company.id == P())
+    if not conn.execute(q.get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
 def _validate_document(conn, doc_id):
     if not doc_id:
         err("--document-id is required")
-    row = conn.execute(Q.from_(Table("legalclaw_document")).select(Table("legalclaw_document").star).where(Field("id") == P()).get_sql(), (doc_id,)).fetchone()
+    q = Q.from_(_doc).select(_doc.star).where(_doc.id == P())
+    row = conn.execute(q.get_sql(), (doc_id,)).fetchone()
     if not row:
         err(f"Document {doc_id} not found")
     return row
@@ -68,7 +79,8 @@ def add_legal_document(conn, args):
 
     matter_id = getattr(args, "matter_id", None)
     if matter_id:
-        if not conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("id")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone():
+        q = Q.from_(_matter).select(_matter.id).where(_matter.id == P())
+        if not conn.execute(q.get_sql(), (matter_id,)).fetchone():
             err(f"Matter {matter_id} not found")
 
     doc_id = str(uuid.uuid4())
@@ -102,7 +114,8 @@ def update_legal_document(conn, args):
     if doc["status"] == "archived":
         err(f"Document {doc_id} is archived and cannot be modified")
 
-    updates, params, changed = [], [], []
+    data = {}
+    changed = []
     for arg_name, col_name in {
         "doc_title": "title", "document_type": "document_type",
         "file_name": "file_name", "content": "content",
@@ -112,24 +125,21 @@ def update_legal_document(conn, args):
         if val is not None:
             if arg_name == "document_type":
                 _validate_enum(val, VALID_DOCUMENT_TYPES, "document-type")
-            updates.append(f"{col_name} = ?")
-            params.append(val)
+            data[col_name] = val
             changed.append(col_name)
 
     document_status = getattr(args, "document_status", None)
     if document_status:
         _validate_enum(document_status, VALID_DOCUMENT_STATUSES, "document-status")
-        updates.append("status = ?")
-        params.append(document_status)
+        data["status"] = document_status
         changed.append("status")
 
-    if not updates:
+    if not data:
         err("No fields to update")
 
-    updates.append("updated_at = ?")
-    params.append(_now_iso())
-    params.append(doc_id)
-    conn.execute(f"UPDATE legalclaw_document SET {', '.join(updates)} WHERE id = ?", params)
+    data["updated_at"] = _now_iso()
+    sql, params = dynamic_update("legalclaw_document", data, where={"id": doc_id})
+    conn.execute(sql, params)
     audit(conn, "legalclaw_document", doc_id, "legal-update-legal-document",
           getattr(args, "company_id", None))
     conn.commit()
@@ -149,26 +159,30 @@ def get_legal_document(conn, args):
 # 4. list-legal-documents
 # ---------------------------------------------------------------------------
 def list_legal_documents(conn, args):
-    sql = "SELECT * FROM legalclaw_document WHERE 1=1"
+    conditions = []
     params = []
     matter_id = getattr(args, "matter_id", None)
     if matter_id:
-        sql += " AND matter_id = ?"
+        conditions.append(_doc.matter_id == P())
         params.append(matter_id)
     document_type = getattr(args, "document_type", None)
     if document_type:
-        sql += " AND document_type = ?"
+        conditions.append(_doc.document_type == P())
         params.append(document_type)
     document_status = getattr(args, "document_status", None)
     if document_status:
-        sql += " AND status = ?"
+        conditions.append(_doc.status == P())
         params.append(document_status)
     if args.company_id:
-        sql += " AND company_id = ?"
+        conditions.append(_doc.company_id == P())
         params.append(args.company_id)
-    sql += " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(sql, params).fetchall()
+
+    q = Q.from_(_doc).select(_doc.star)
+    for cond in conditions:
+        q = q.where(cond)
+    q = q.orderby(_doc.updated_at, order=Order.desc).limit(P()).offset(P())
+
+    rows = conn.execute(q.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({"documents": [row_to_dict(r) for r in rows], "count": len(rows)})
 
 
@@ -188,14 +202,11 @@ def file_document(conn, args):
     court_reference = getattr(args, "court_reference", None)
 
     now = _now_iso()
-    updates = "status = 'filed', filed_date = ?, updated_at = ?"
-    params = [filed_date, now]
+    data = {"status": "filed", "filed_date": filed_date, "updated_at": now}
     if court_reference:
-        updates += ", court_reference = ?"
-        params.append(court_reference)
-    params.append(doc_id)
-
-    conn.execute(f"UPDATE legalclaw_document SET {updates} WHERE id = ?", params)
+        data["court_reference"] = court_reference
+    sql, params = dynamic_update("legalclaw_document", data, where={"id": doc_id})
+    conn.execute(sql, params)
     audit(conn, "legalclaw_document", doc_id, "legal-file-document",
           getattr(args, "company_id", None))
     conn.commit()
@@ -213,8 +224,10 @@ def archive_document(conn, args):
         err(f"Document {doc_id} is already archived")
 
     now = _now_iso()
-    conn.execute("UPDATE legalclaw_document SET status = 'archived', updated_at = ? WHERE id = ?",
-                 (now, doc_id))
+    sql, params = dynamic_update("legalclaw_document",
+        {"status": "archived", "updated_at": now},
+        where={"id": doc_id})
+    conn.execute(sql, params)
     audit(conn, "legalclaw_document", doc_id, "legal-archive-document",
           getattr(args, "company_id", None))
     conn.commit()
@@ -229,25 +242,29 @@ def search_legal_documents(conn, args):
     if not search:
         err("--search is required")
 
-    sql = """SELECT * FROM legalclaw_document
-             WHERE (title LIKE ? OR content LIKE ? OR file_name LIKE ?)"""
+    conditions = [
+        _doc.title.like(P()) | _doc.content.like(P()) | _doc.file_name.like(P())
+    ]
     params = [f"%{search}%", f"%{search}%", f"%{search}%"]
 
     matter_id = getattr(args, "matter_id", None)
     if matter_id:
-        sql += " AND matter_id = ?"
+        conditions.append(_doc.matter_id == P())
         params.append(matter_id)
     document_type = getattr(args, "document_type", None)
     if document_type:
-        sql += " AND document_type = ?"
+        conditions.append(_doc.document_type == P())
         params.append(document_type)
     if args.company_id:
-        sql += " AND company_id = ?"
+        conditions.append(_doc.company_id == P())
         params.append(args.company_id)
 
-    sql += " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(sql, params).fetchall()
+    q = Q.from_(_doc).select(_doc.star)
+    for cond in conditions:
+        q = q.where(cond)
+    q = q.orderby(_doc.updated_at, order=Order.desc).limit(P()).offset(P())
+
+    rows = conn.execute(q.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({"documents": [row_to_dict(r) for r in rows], "count": len(rows)})
 
 
@@ -270,14 +287,14 @@ def add_document_version(conn, args):
     content = getattr(args, "content", None)
     now = _now_iso()
 
-    conn.execute("""
-        UPDATE legalclaw_document SET version = ?, content = ?, updated_at = ?
-        WHERE id = ?
-    """, (new_version, content or doc["content"], now, doc_id))
+    data = {"version": new_version, "content": content or doc["content"], "updated_at": now}
+    sql, params = dynamic_update("legalclaw_document", data, where={"id": doc_id})
+    conn.execute(sql, params)
 
     # Reset status to draft when new version is created
     if doc["status"] in ("final", "filed"):
-        conn.execute("UPDATE legalclaw_document SET status = 'draft' WHERE id = ?", (doc_id,))
+        sql2, params2 = dynamic_update("legalclaw_document", {"status": "draft"}, where={"id": doc_id})
+        conn.execute(sql2, params2)
 
     audit(conn, "legalclaw_document", doc_id, "legal-add-document-version",
           getattr(args, "company_id", None))
@@ -296,12 +313,14 @@ def list_document_versions(conn, args):
     d = row_to_dict(doc)
 
     # Get version history from audit log
-    history = conn.execute("""
-        SELECT timestamp, action, description
-        FROM audit_log
-        WHERE entity_type = 'legalclaw_document' AND entity_id = ?
-        ORDER BY timestamp DESC
-    """, (doc_id,)).fetchall()
+    hist_q = (
+        Q.from_(_audit)
+        .select(_audit.timestamp, _audit.action, _audit.description)
+        .where(_audit.entity_type == "legalclaw_document")
+        .where(_audit.entity_id == P())
+        .orderby(_audit.timestamp, order=Order.desc)
+    )
+    history = conn.execute(hist_q.get_sql(), (doc_id,)).fetchall()
 
     ok({
         "document_id": doc_id,
@@ -320,16 +339,20 @@ def document_index(conn, args):
     matter_id = getattr(args, "matter_id", None)
     if not matter_id:
         err("--matter-id is required")
-    if not conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("id")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone():
+    mq = Q.from_(_matter).select(_matter.id).where(_matter.id == P())
+    if not conn.execute(mq.get_sql(), (matter_id,)).fetchone():
         err(f"Matter {matter_id} not found")
 
-    rows = conn.execute("""
-        SELECT id, naming_series, title, document_type, version, status,
-               filed_date, court_reference, created_at, updated_at
-        FROM legalclaw_document
-        WHERE matter_id = ?
-        ORDER BY document_type, title
-    """, (matter_id,)).fetchall()
+    q = (
+        Q.from_(_doc)
+        .select(
+            _doc.id, _doc.naming_series, _doc.title, _doc.document_type, _doc.version,
+            _doc.status, _doc.filed_date, _doc.court_reference, _doc.created_at, _doc.updated_at,
+        )
+        .where(_doc.matter_id == P())
+        .orderby(_doc.document_type).orderby(_doc.title)
+    )
+    rows = conn.execute(q.get_sql(), (matter_id,)).fetchall()
 
     # Group by type
     by_type = {}

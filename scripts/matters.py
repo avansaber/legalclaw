@@ -22,7 +22,10 @@ try:
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.cross_skill import create_customer, CrossSkillError
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+    from erpclaw_lib.query import (
+        Q, P, Table, Field, fn, Order, LiteralValue,
+        insert_row, update_row, dynamic_update,
+    )
 
     ENTITY_PREFIXES.setdefault("legalclaw_client_ext", "LCLI-")
     ENTITY_PREFIXES.setdefault("legalclaw_matter", "LMTR-")
@@ -46,6 +49,18 @@ VALID_PARTY_TYPES = (
     "judge", "mediator", "party", "other",
 )
 
+# ── Table aliases ──
+_company = Table("company")
+_ext = Table("legalclaw_client_ext")
+_cust = Table("customer")
+_matter = Table("legalclaw_matter")
+_party = Table("legalclaw_matter_party")
+_te = Table("legalclaw_time_entry")
+_expense = Table("legalclaw_expense")
+_trust_txn = Table("legalclaw_trust_transaction")
+_deadline = Table("legalclaw_deadline")
+_inv = Table("legalclaw_invoice")
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -53,21 +68,24 @@ VALID_PARTY_TYPES = (
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute(Q.from_(Table("company")).select(Field("id")).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
+    q = Q.from_(_company).select(_company.id).where(_company.id == P())
+    if not conn.execute(q.get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
 def _validate_client(conn, client_id):
     if not client_id:
         err("--client-id is required")
-    if not conn.execute(Q.from_(Table("legalclaw_client_ext")).select(Field("id")).where(Field("id") == P()).get_sql(), (client_id,)).fetchone():
+    q = Q.from_(_ext).select(_ext.id).where(_ext.id == P())
+    if not conn.execute(q.get_sql(), (client_id,)).fetchone():
         err(f"Client {client_id} not found")
 
 
 def _validate_matter(conn, matter_id):
     if not matter_id:
         err("--matter-id is required")
-    row = conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("id")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone()
+    q = Q.from_(_matter).select(_matter.id).where(_matter.id == P())
+    row = conn.execute(q.get_sql(), (matter_id,)).fetchone()
     if not row:
         err(f"Matter {matter_id} not found")
     return row
@@ -135,9 +153,8 @@ def update_client(conn, args):
     client_id = getattr(args, "client_id", None)
     if not client_id:
         err("--client-id is required")
-    row = conn.execute("""
-        SELECT ext.id, ext.customer_id FROM legalclaw_client_ext ext WHERE ext.id = ?
-    """, (client_id,)).fetchone()
+    q = Q.from_(_ext).select(_ext.id, _ext.customer_id).where(_ext.id == P())
+    row = conn.execute(q.get_sql(), (client_id,)).fetchone()
     if not row:
         err(f"Client {client_id} not found")
 
@@ -168,35 +185,31 @@ def update_client(conn, args):
         changed.extend([k.lstrip("-").replace("-", "_") for k in core_updates.keys()])
 
     # --- Update extension table fields ---
-    ext_updates, ext_params = [], []
+    ext_data = {}
     client_type = getattr(args, "client_type", None)
     if client_type is not None:
         _validate_enum(client_type, VALID_CLIENT_TYPES, "client-type")
-        ext_updates.append("client_type = ?")
-        ext_params.append(client_type)
+        ext_data["client_type"] = client_type
         changed.append("client_type")
 
     billing_rate = getattr(args, "billing_rate", None)
     if billing_rate is not None:
         to_decimal(billing_rate)
-        ext_updates.append("billing_rate = ?")
-        ext_params.append(billing_rate)
+        ext_data["billing_rate"] = billing_rate
         changed.append("billing_rate")
 
     is_active = getattr(args, "is_active", None)
     if is_active is not None:
-        ext_updates.append("is_active = ?")
-        ext_params.append(int(is_active))
+        ext_data["is_active"] = int(is_active)
         changed.append("is_active")
 
     if not changed:
         err("No fields to update")
 
-    if ext_updates:
-        ext_updates.append("updated_at = ?")
-        ext_params.append(_now_iso())
-        ext_params.append(client_id)
-        conn.execute(f"UPDATE legalclaw_client_ext SET {', '.join(ext_updates)} WHERE id = ?", ext_params)
+    if ext_data:
+        ext_data["updated_at"] = _now_iso()
+        sql, params = dynamic_update("legalclaw_client_ext", ext_data, where={"id": client_id})
+        conn.execute(sql, params)
 
     audit(conn, "legalclaw_client_ext", client_id, "legal-update-client",
           getattr(args, "company_id", None))
@@ -211,14 +224,19 @@ def get_client(conn, args):
     client_id = getattr(args, "client_id", None)
     if not client_id:
         err("--client-id is required")
-    row = conn.execute("""
-        SELECT ext.*, c.name, c.customer_type AS core_customer_type,
-               c.primary_address AS address, c.primary_contact AS phone,
-               c.tax_id
-        FROM legalclaw_client_ext ext
-        JOIN customer c ON ext.customer_id = c.id
-        WHERE ext.id = ?
-    """, (client_id,)).fetchone()
+    q = (
+        Q.from_(_ext)
+        .join(_cust).on(_ext.customer_id == _cust.id)
+        .select(
+            _ext.star, _cust.name,
+            _cust.customer_type.as_("core_customer_type"),
+            _cust.primary_address.as_("address"),
+            _cust.primary_contact.as_("phone"),
+            _cust.tax_id,
+        )
+        .where(_ext.id == P())
+    )
+    row = conn.execute(q.get_sql(), (client_id,)).fetchone()
     if not row:
         err(f"Client {client_id} not found")
     ok(row_to_dict(row))
@@ -228,28 +246,33 @@ def get_client(conn, args):
 # 4. list-clients
 # ---------------------------------------------------------------------------
 def list_clients(conn, args):
-    sql = """
-        SELECT ext.*, c.name, c.primary_address AS address,
-               c.primary_contact AS phone, c.tax_id
-        FROM legalclaw_client_ext ext
-        JOIN customer c ON ext.customer_id = c.id
-        WHERE 1=1
-    """
+    base = Q.from_(_ext).join(_cust).on(_ext.customer_id == _cust.id)
+    conditions = []
     params = []
+
     if args.company_id:
-        sql += " AND ext.company_id = ?"
+        conditions.append(_ext.company_id == P())
         params.append(args.company_id)
     search = getattr(args, "search", None)
     if search:
-        sql += " AND (c.name LIKE ? OR c.primary_contact LIKE ?)"
+        conditions.append(_cust.name.like(P()) | _cust.primary_contact.like(P()))
         params.extend([f"%{search}%", f"%{search}%"])
     is_active = getattr(args, "is_active", None)
     if is_active is not None:
-        sql += " AND ext.is_active = ?"
+        conditions.append(_ext.is_active == P())
         params.append(int(is_active))
-    sql += " ORDER BY c.name ASC LIMIT ? OFFSET ?"
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(sql, params).fetchall()
+
+    q = base.select(
+        _ext.star, _cust.name,
+        _cust.primary_address.as_("address"),
+        _cust.primary_contact.as_("phone"),
+        _cust.tax_id,
+    )
+    for cond in conditions:
+        q = q.where(cond)
+    q = q.orderby(_cust.name, order=Order.asc).limit(P()).offset(P())
+
+    rows = conn.execute(q.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({"clients": [row_to_dict(r) for r in rows], "count": len(rows)})
 
 
@@ -307,7 +330,8 @@ def update_matter(conn, args):
     matter_id = getattr(args, "matter_id", None)
     _validate_matter(conn, matter_id)
 
-    updates, params, changed = [], [], []
+    data = {}
+    changed = []
     for arg_name, col_name in {
         "title": "title", "practice_area": "practice_area",
         "description": "description", "lead_attorney": "lead_attorney",
@@ -322,24 +346,21 @@ def update_matter(conn, args):
                 _validate_enum(val, VALID_BILLING_METHODS, "billing-method")
             if arg_name in ("billing_rate", "budget"):
                 to_decimal(val)
-            updates.append(f"{col_name} = ?")
-            params.append(val)
+            data[col_name] = val
             changed.append(col_name)
 
     matter_status = getattr(args, "matter_status", None)
     if matter_status:
         _validate_enum(matter_status, VALID_MATTER_STATUSES, "matter-status")
-        updates.append("status = ?")
-        params.append(matter_status)
+        data["status"] = matter_status
         changed.append("status")
 
-    if not updates:
+    if not data:
         err("No fields to update")
 
-    updates.append("updated_at = ?")
-    params.append(_now_iso())
-    params.append(matter_id)
-    conn.execute(f"UPDATE legalclaw_matter SET {', '.join(updates)} WHERE id = ?", params)
+    data["updated_at"] = _now_iso()
+    sql, params = dynamic_update("legalclaw_matter", data, where={"id": matter_id})
+    conn.execute(sql, params)
     audit(conn, "legalclaw_matter", matter_id, "legal-update-matter",
           getattr(args, "company_id", None))
     conn.commit()
@@ -352,7 +373,8 @@ def update_matter(conn, args):
 def get_matter(conn, args):
     matter_id = getattr(args, "matter_id", None)
     _validate_matter(conn, matter_id)
-    row = conn.execute(Q.from_(Table("legalclaw_matter")).select(Table("legalclaw_matter").star).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone()
+    q = Q.from_(_matter).select(_matter.star).where(_matter.id == P())
+    row = conn.execute(q.get_sql(), (matter_id,)).fetchone()
     ok(row_to_dict(row))
 
 
@@ -360,30 +382,34 @@ def get_matter(conn, args):
 # 8. list-matters
 # ---------------------------------------------------------------------------
 def list_matters(conn, args):
-    sql = "SELECT * FROM legalclaw_matter WHERE 1=1"
+    conditions = []
     params = []
     if args.company_id:
-        sql += " AND company_id = ?"
+        conditions.append(_matter.company_id == P())
         params.append(args.company_id)
     client_id = getattr(args, "client_id", None)
     if client_id:
-        sql += " AND client_id = ?"
+        conditions.append(_matter.client_id == P())
         params.append(client_id)
     matter_status = getattr(args, "matter_status", None)
     if matter_status:
-        sql += " AND status = ?"
+        conditions.append(_matter.status == P())
         params.append(matter_status)
     practice_area = getattr(args, "practice_area", None)
     if practice_area:
-        sql += " AND practice_area = ?"
+        conditions.append(_matter.practice_area == P())
         params.append(practice_area)
     search = getattr(args, "search", None)
     if search:
-        sql += " AND (title LIKE ? OR matter_number LIKE ?)"
+        conditions.append(_matter.title.like(P()) | _matter.matter_number.like(P()))
         params.extend([f"%{search}%", f"%{search}%"])
-    sql += " ORDER BY opened_date DESC LIMIT ? OFFSET ?"
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(sql, params).fetchall()
+
+    q = Q.from_(_matter).select(_matter.star)
+    for cond in conditions:
+        q = q.where(cond)
+    q = q.orderby(_matter.opened_date, order=Order.desc).limit(P()).offset(P())
+
+    rows = conn.execute(q.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({"matters": [row_to_dict(r) for r in rows], "count": len(rows)})
 
 
@@ -421,18 +447,22 @@ def add_matter_party(conn, args):
 # ---------------------------------------------------------------------------
 def list_matter_parties(conn, args):
     matter_id = getattr(args, "matter_id", None)
-    sql = "SELECT * FROM legalclaw_matter_party WHERE 1=1"
+    conditions = []
     params = []
     if matter_id:
-        sql += " AND matter_id = ?"
+        conditions.append(_party.matter_id == P())
         params.append(matter_id)
     party_type = getattr(args, "party_type", None)
     if party_type:
-        sql += " AND party_type = ?"
+        conditions.append(_party.party_type == P())
         params.append(party_type)
-    sql += " ORDER BY party_name ASC LIMIT ? OFFSET ?"
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(sql, params).fetchall()
+
+    q = Q.from_(_party).select(_party.star)
+    for cond in conditions:
+        q = q.where(cond)
+    q = q.orderby(_party.party_name, order=Order.asc).limit(P()).offset(P())
+
+    rows = conn.execute(q.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({"parties": [row_to_dict(r) for r in rows], "count": len(rows)})
 
 
@@ -443,18 +473,18 @@ def close_matter(conn, args):
     matter_id = getattr(args, "matter_id", None)
     _validate_matter(conn, matter_id)
 
-    row = conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("status")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone()
+    q = Q.from_(_matter).select(_matter.status).where(_matter.id == P())
+    row = conn.execute(q.get_sql(), (matter_id,)).fetchone()
     current_status = row["status"] if row else None
     if current_status == "closed":
         err(f"Matter {matter_id} is already closed")
 
     now = _now_iso()
     closed_date = getattr(args, "closed_date", None) or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    conn.execute("""
-        UPDATE legalclaw_matter
-        SET status = 'closed', closed_date = ?, updated_at = ?
-        WHERE id = ?
-    """, (closed_date, now, matter_id))
+    sql, params = dynamic_update("legalclaw_matter",
+        {"status": "closed", "closed_date": closed_date, "updated_at": now},
+        where={"id": matter_id})
+    conn.execute(sql, params)
     audit(conn, "legalclaw_matter", matter_id, "legal-close-matter",
           getattr(args, "company_id", None))
     conn.commit()
@@ -468,17 +498,22 @@ def reopen_matter(conn, args):
     matter_id = getattr(args, "matter_id", None)
     _validate_matter(conn, matter_id)
 
-    row = conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("status")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone()
+    q = Q.from_(_matter).select(_matter.status).where(_matter.id == P())
+    row = conn.execute(q.get_sql(), (matter_id,)).fetchone()
     current_status = row["status"] if row else None
     if current_status != "closed":
         err(f"Matter {matter_id} is not closed (current status: {current_status})")
 
     now = _now_iso()
-    conn.execute("""
-        UPDATE legalclaw_matter
-        SET status = 'active', closed_date = NULL, updated_at = ?
-        WHERE id = ?
-    """, (now, matter_id))
+    t = Table("legalclaw_matter")
+    upd = (
+        Q.update(t)
+        .set(t.status, "active")
+        .set(t.closed_date, None)
+        .set(t.updated_at, P())
+        .where(t.id == P())
+    )
+    conn.execute(upd.get_sql(), (now, matter_id))
     audit(conn, "legalclaw_matter", matter_id, "legal-reopen-matter",
           getattr(args, "company_id", None))
     conn.commit()
@@ -492,56 +527,90 @@ def matter_summary(conn, args):
     matter_id = getattr(args, "matter_id", None)
     _validate_matter(conn, matter_id)
 
-    matter = conn.execute(Q.from_(Table("legalclaw_matter")).select(Table("legalclaw_matter").star).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone()
+    q = Q.from_(_matter).select(_matter.star).where(_matter.id == P())
+    matter = conn.execute(q.get_sql(), (matter_id,)).fetchone()
     m = row_to_dict(matter)
 
     # Time entries summary
-    time_rows = conn.execute("""
-        SELECT COUNT(*) as count,
-               COALESCE(SUM(CAST(hours AS REAL)), 0) as total_hours,
-               COALESCE(SUM(CAST(amount AS REAL)), 0) as total_amount
-        FROM legalclaw_time_entry WHERE matter_id = ?
-    """, (matter_id,)).fetchone()
+    time_q = (
+        Q.from_(_te)
+        .select(
+            fn.Count("*").as_("count"),
+            LiteralValue("COALESCE(SUM(CAST(hours AS REAL)), 0)").as_("total_hours"),
+            LiteralValue("COALESCE(SUM(CAST(amount AS REAL)), 0)").as_("total_amount"),
+        )
+        .where(_te.matter_id == P())
+    )
+    time_rows = conn.execute(time_q.get_sql(), (matter_id,)).fetchone()
 
-    unbilled_time = conn.execute("""
-        SELECT COUNT(*) as count,
-               COALESCE(SUM(CAST(amount AS REAL)), 0) as total_amount
-        FROM legalclaw_time_entry WHERE matter_id = ? AND is_billed = 0 AND is_billable = 1
-    """, (matter_id,)).fetchone()
+    unbilled_q = (
+        Q.from_(_te)
+        .select(
+            fn.Count("*").as_("count"),
+            LiteralValue("COALESCE(SUM(CAST(amount AS REAL)), 0)").as_("total_amount"),
+        )
+        .where(_te.matter_id == P())
+        .where(_te.is_billed == 0)
+        .where(_te.is_billable == 1)
+    )
+    unbilled_time = conn.execute(unbilled_q.get_sql(), (matter_id,)).fetchone()
 
     # Expenses summary
-    expense_rows = conn.execute("""
-        SELECT COUNT(*) as count,
-               COALESCE(SUM(CAST(amount AS REAL)), 0) as total_amount
-        FROM legalclaw_expense WHERE matter_id = ?
-    """, (matter_id,)).fetchone()
+    exp_q = (
+        Q.from_(_expense)
+        .select(
+            fn.Count("*").as_("count"),
+            LiteralValue("COALESCE(SUM(CAST(amount AS REAL)), 0)").as_("total_amount"),
+        )
+        .where(_expense.matter_id == P())
+    )
+    expense_rows = conn.execute(exp_q.get_sql(), (matter_id,)).fetchone()
 
-    unbilled_expenses = conn.execute("""
-        SELECT COUNT(*) as count,
-               COALESCE(SUM(CAST(amount AS REAL)), 0) as total_amount
-        FROM legalclaw_expense WHERE matter_id = ? AND is_billed = 0 AND is_billable = 1
-    """, (matter_id,)).fetchone()
+    unbilled_exp_q = (
+        Q.from_(_expense)
+        .select(
+            fn.Count("*").as_("count"),
+            LiteralValue("COALESCE(SUM(CAST(amount AS REAL)), 0)").as_("total_amount"),
+        )
+        .where(_expense.matter_id == P())
+        .where(_expense.is_billed == 0)
+        .where(_expense.is_billable == 1)
+    )
+    unbilled_expenses = conn.execute(unbilled_exp_q.get_sql(), (matter_id,)).fetchone()
 
     # Trust balance
-    trust_row = conn.execute("""
-        SELECT COALESCE(SUM(CASE WHEN transaction_type = 'deposit' THEN CAST(amount AS REAL) ELSE 0 END), 0)
-             - COALESCE(SUM(CASE WHEN transaction_type IN ('disbursement','fee') THEN CAST(amount AS REAL) ELSE 0 END), 0) as trust_balance
-        FROM legalclaw_trust_transaction WHERE matter_id = ?
-    """, (matter_id,)).fetchone()
+    trust_q = (
+        Q.from_(_trust_txn)
+        .select(
+            LiteralValue(
+                "COALESCE(SUM(CASE WHEN transaction_type = 'deposit' THEN CAST(amount AS REAL) ELSE 0 END), 0)"
+                " - COALESCE(SUM(CASE WHEN transaction_type IN ('disbursement','fee') THEN CAST(amount AS REAL) ELSE 0 END), 0)"
+            ).as_("trust_balance"),
+        )
+        .where(_trust_txn.matter_id == P())
+    )
+    trust_row = conn.execute(trust_q.get_sql(), (matter_id,)).fetchone()
 
     # Open deadlines
-    open_deadlines = conn.execute("""
-        SELECT COUNT(*) as count FROM legalclaw_deadline
-        WHERE matter_id = ? AND is_completed = 0
-    """, (matter_id,)).fetchone()
+    dl_q = (
+        Q.from_(_deadline)
+        .select(fn.Count("*").as_("count"))
+        .where(_deadline.matter_id == P())
+        .where(_deadline.is_completed == 0)
+    )
+    open_deadlines = conn.execute(dl_q.get_sql(), (matter_id,)).fetchone()
 
     # Invoices summary
-    inv_row = conn.execute("""
-        SELECT COUNT(*) as count,
-               COALESCE(SUM(CAST(total_amount AS REAL)), 0) as total_invoiced,
-               COALESCE(SUM(CAST(paid_amount AS REAL)), 0) as total_collected
-        FROM legalclaw_invoice WHERE matter_id = ?
-    """, (matter_id,)).fetchone()
+    inv_q = (
+        Q.from_(_inv)
+        .select(
+            fn.Count("*").as_("count"),
+            LiteralValue("COALESCE(SUM(CAST(total_amount AS REAL)), 0)").as_("total_invoiced"),
+            LiteralValue("COALESCE(SUM(CAST(paid_amount AS REAL)), 0)").as_("total_collected"),
+        )
+        .where(_inv.matter_id == P())
+    )
+    inv_row = conn.execute(inv_q.get_sql(), (matter_id,)).fetchone()
 
     ok({
         "matter_id": matter_id,
@@ -576,20 +645,26 @@ def client_portfolio(conn, args):
     client_id = getattr(args, "client_id", None)
     _validate_client(conn, client_id)
 
-    client = conn.execute("""
-        SELECT ext.*, c.name
-        FROM legalclaw_client_ext ext
-        JOIN customer c ON ext.customer_id = c.id
-        WHERE ext.id = ?
-    """, (client_id,)).fetchone()
+    q = (
+        Q.from_(_ext)
+        .join(_cust).on(_ext.customer_id == _cust.id)
+        .select(_ext.star, _cust.name)
+        .where(_ext.id == P())
+    )
+    client = conn.execute(q.get_sql(), (client_id,)).fetchone()
     c = row_to_dict(client)
 
-    matters = conn.execute("""
-        SELECT id, naming_series, title, practice_area, billing_method,
-               status, opened_date, closed_date, billed_amount, collected_amount, trust_balance
-        FROM legalclaw_matter WHERE client_id = ?
-        ORDER BY opened_date DESC
-    """, (client_id,)).fetchall()
+    mq = (
+        Q.from_(_matter)
+        .select(
+            _matter.id, _matter.naming_series, _matter.title, _matter.practice_area,
+            _matter.billing_method, _matter.status, _matter.opened_date, _matter.closed_date,
+            _matter.billed_amount, _matter.collected_amount, _matter.trust_balance,
+        )
+        .where(_matter.client_id == P())
+        .orderby(_matter.opened_date, order=Order.desc)
+    )
+    matters = conn.execute(mq.get_sql(), (client_id,)).fetchall()
 
     active_count = sum(1 for m in matters if m["status"] == "active")
     closed_count = sum(1 for m in matters if m["status"] == "closed")

@@ -13,7 +13,10 @@ try:
     from erpclaw_lib.db import get_connection
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+    from erpclaw_lib.query import (
+        Q, P, Table, Field, fn, Order,
+        insert_row, update_row, dynamic_update,
+    )
 except ImportError:
     pass
 
@@ -26,6 +29,12 @@ VALID_EVENT_TYPES = (
 VALID_EVENT_STATUSES = ("scheduled", "completed", "cancelled", "postponed")
 VALID_DEADLINE_TYPES = ("filing", "response", "discovery", "statute", "appeal", "other")
 
+# ── Table aliases ──
+_company = Table("company")
+_matter = Table("legalclaw_matter")
+_event = Table("legalclaw_calendar_event")
+_dl = Table("legalclaw_deadline")
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -33,7 +42,8 @@ VALID_DEADLINE_TYPES = ("filing", "response", "discovery", "statute", "appeal", 
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute(Q.from_(Table("company")).select(Field("id")).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
+    q = Q.from_(_company).select(_company.id).where(_company.id == P())
+    if not conn.execute(q.get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -61,7 +71,8 @@ def add_calendar_event(conn, args):
 
     matter_id = getattr(args, "matter_id", None)
     if matter_id:
-        if not conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("id")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone():
+        q = Q.from_(_matter).select(_matter.id).where(_matter.id == P())
+        if not conn.execute(q.get_sql(), (matter_id,)).fetchone():
             err(f"Matter {matter_id} not found")
 
     is_critical = 0
@@ -104,11 +115,13 @@ def update_calendar_event(conn, args):
     event_id = getattr(args, "event_id", None)
     if not event_id:
         err("--event-id is required")
-    row = conn.execute(Q.from_(Table("legalclaw_calendar_event")).select(Table("legalclaw_calendar_event").star).where(Field("id") == P()).get_sql(), (event_id,)).fetchone()
+    q = Q.from_(_event).select(_event.star).where(_event.id == P())
+    row = conn.execute(q.get_sql(), (event_id,)).fetchone()
     if not row:
         err(f"Calendar event {event_id} not found")
 
-    updates, params, changed = [], [], []
+    data = {}
+    changed = []
     for arg_name, col_name in {
         "event_title": "title", "event_type": "event_type",
         "event_date": "event_date", "event_time": "event_time",
@@ -118,36 +131,31 @@ def update_calendar_event(conn, args):
         if val is not None:
             if arg_name == "event_type":
                 _validate_enum(val, VALID_EVENT_TYPES, "event-type")
-            updates.append(f"{col_name} = ?")
-            params.append(val)
+            data[col_name] = val
             changed.append(col_name)
 
     event_status = getattr(args, "event_status", None)
     if event_status:
         _validate_enum(event_status, VALID_EVENT_STATUSES, "event-status")
-        updates.append("status = ?")
-        params.append(event_status)
+        data["status"] = event_status
         changed.append("status")
 
     rd = getattr(args, "reminder_days", None)
     if rd is not None:
-        updates.append("reminder_days = ?")
-        params.append(int(rd))
+        data["reminder_days"] = int(rd)
         changed.append("reminder_days")
 
     ic = getattr(args, "is_critical", None)
     if ic is not None:
-        updates.append("is_critical = ?")
-        params.append(int(ic))
+        data["is_critical"] = int(ic)
         changed.append("is_critical")
 
-    if not updates:
+    if not data:
         err("No fields to update")
 
-    updates.append("updated_at = ?")
-    params.append(_now_iso())
-    params.append(event_id)
-    conn.execute(f"UPDATE legalclaw_calendar_event SET {', '.join(updates)} WHERE id = ?", params)
+    data["updated_at"] = _now_iso()
+    sql, params = dynamic_update("legalclaw_calendar_event", data, where={"id": event_id})
+    conn.execute(sql, params)
     audit(conn, "legalclaw_calendar_event", event_id, "legal-update-calendar-event",
           getattr(args, "company_id", None))
     conn.commit()
@@ -158,26 +166,30 @@ def update_calendar_event(conn, args):
 # 3. list-calendar-events
 # ---------------------------------------------------------------------------
 def list_calendar_events(conn, args):
-    sql = "SELECT * FROM legalclaw_calendar_event WHERE 1=1"
+    conditions = []
     params = []
     matter_id = getattr(args, "matter_id", None)
     if matter_id:
-        sql += " AND matter_id = ?"
+        conditions.append(_event.matter_id == P())
         params.append(matter_id)
     event_type = getattr(args, "event_type", None)
     if event_type:
-        sql += " AND event_type = ?"
+        conditions.append(_event.event_type == P())
         params.append(event_type)
     event_status = getattr(args, "event_status", None)
     if event_status:
-        sql += " AND status = ?"
+        conditions.append(_event.status == P())
         params.append(event_status)
     if args.company_id:
-        sql += " AND company_id = ?"
+        conditions.append(_event.company_id == P())
         params.append(args.company_id)
-    sql += " ORDER BY event_date ASC LIMIT ? OFFSET ?"
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(sql, params).fetchall()
+
+    q = Q.from_(_event).select(_event.star)
+    for cond in conditions:
+        q = q.where(cond)
+    q = q.orderby(_event.event_date, order=Order.asc).limit(P()).offset(P())
+
+    rows = conn.execute(q.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({"events": [row_to_dict(r) for r in rows], "count": len(rows)})
 
 
@@ -188,15 +200,18 @@ def complete_event(conn, args):
     event_id = getattr(args, "event_id", None)
     if not event_id:
         err("--event-id is required")
-    row = conn.execute(Q.from_(Table("legalclaw_calendar_event")).select(Table("legalclaw_calendar_event").star).where(Field("id") == P()).get_sql(), (event_id,)).fetchone()
+    q = Q.from_(_event).select(_event.star).where(_event.id == P())
+    row = conn.execute(q.get_sql(), (event_id,)).fetchone()
     if not row:
         err(f"Calendar event {event_id} not found")
     if row["status"] == "completed":
         err(f"Event {event_id} is already completed")
 
     now = _now_iso()
-    conn.execute("UPDATE legalclaw_calendar_event SET status = 'completed', updated_at = ? WHERE id = ?",
-                 (now, event_id))
+    sql, params = dynamic_update("legalclaw_calendar_event",
+        {"status": "completed", "updated_at": now},
+        where={"id": event_id})
+    conn.execute(sql, params)
     audit(conn, "legalclaw_calendar_event", event_id, "legal-complete-event",
           getattr(args, "company_id", None))
     conn.commit()
@@ -212,7 +227,8 @@ def add_deadline(conn, args):
     matter_id = getattr(args, "matter_id", None)
     if not matter_id:
         err("--matter-id is required")
-    if not conn.execute(Q.from_(Table("legalclaw_matter")).select(Field("id")).where(Field("id") == P()).get_sql(), (matter_id,)).fetchone():
+    q = Q.from_(_matter).select(_matter.id).where(_matter.id == P())
+    if not conn.execute(q.get_sql(), (matter_id,)).fetchone():
         err(f"Matter {matter_id} not found")
 
     deadline_title = getattr(args, "deadline_title", None)
@@ -258,11 +274,13 @@ def update_deadline(conn, args):
     dl_id = getattr(args, "deadline_id", None)
     if not dl_id:
         err("--deadline-id is required")
-    row = conn.execute(Q.from_(Table("legalclaw_deadline")).select(Table("legalclaw_deadline").star).where(Field("id") == P()).get_sql(), (dl_id,)).fetchone()
+    q = Q.from_(_dl).select(_dl.star).where(_dl.id == P())
+    row = conn.execute(q.get_sql(), (dl_id,)).fetchone()
     if not row:
         err(f"Deadline {dl_id} not found")
 
-    updates, params, changed = [], [], []
+    data = {}
+    changed = []
     for arg_name, col_name in {
         "deadline_title": "title", "deadline_type": "deadline_type",
         "due_date": "due_date", "assigned_to": "assigned_to", "notes": "notes",
@@ -271,23 +289,20 @@ def update_deadline(conn, args):
         if val is not None:
             if arg_name == "deadline_type":
                 _validate_enum(val, VALID_DEADLINE_TYPES, "deadline-type")
-            updates.append(f"{col_name} = ?")
-            params.append(val)
+            data[col_name] = val
             changed.append(col_name)
 
     ico = getattr(args, "is_court_imposed", None)
     if ico is not None:
-        updates.append("is_court_imposed = ?")
-        params.append(int(ico))
+        data["is_court_imposed"] = int(ico)
         changed.append("is_court_imposed")
 
-    if not updates:
+    if not data:
         err("No fields to update")
 
-    updates.append("updated_at = ?")
-    params.append(_now_iso())
-    params.append(dl_id)
-    conn.execute(f"UPDATE legalclaw_deadline SET {', '.join(updates)} WHERE id = ?", params)
+    data["updated_at"] = _now_iso()
+    sql, params = dynamic_update("legalclaw_deadline", data, where={"id": dl_id})
+    conn.execute(sql, params)
     audit(conn, "legalclaw_deadline", dl_id, "legal-update-deadline",
           getattr(args, "company_id", None))
     conn.commit()
@@ -298,26 +313,30 @@ def update_deadline(conn, args):
 # 7. list-deadlines
 # ---------------------------------------------------------------------------
 def list_deadlines(conn, args):
-    sql = "SELECT * FROM legalclaw_deadline WHERE 1=1"
+    conditions = []
     params = []
     matter_id = getattr(args, "matter_id", None)
     if matter_id:
-        sql += " AND matter_id = ?"
+        conditions.append(_dl.matter_id == P())
         params.append(matter_id)
     deadline_type = getattr(args, "deadline_type", None)
     if deadline_type:
-        sql += " AND deadline_type = ?"
+        conditions.append(_dl.deadline_type == P())
         params.append(deadline_type)
     is_completed = getattr(args, "is_completed", None)
     if is_completed is not None:
-        sql += " AND is_completed = ?"
+        conditions.append(_dl.is_completed == P())
         params.append(int(is_completed))
     if args.company_id:
-        sql += " AND company_id = ?"
+        conditions.append(_dl.company_id == P())
         params.append(args.company_id)
-    sql += " ORDER BY due_date ASC LIMIT ? OFFSET ?"
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(sql, params).fetchall()
+
+    q = Q.from_(_dl).select(_dl.star)
+    for cond in conditions:
+        q = q.where(cond)
+    q = q.orderby(_dl.due_date, order=Order.asc).limit(P()).offset(P())
+
+    rows = conn.execute(q.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({"deadlines": [row_to_dict(r) for r in rows], "count": len(rows)})
 
 
@@ -328,7 +347,8 @@ def complete_deadline(conn, args):
     dl_id = getattr(args, "deadline_id", None)
     if not dl_id:
         err("--deadline-id is required")
-    row = conn.execute(Q.from_(Table("legalclaw_deadline")).select(Table("legalclaw_deadline").star).where(Field("id") == P()).get_sql(), (dl_id,)).fetchone()
+    q = Q.from_(_dl).select(_dl.star).where(_dl.id == P())
+    row = conn.execute(q.get_sql(), (dl_id,)).fetchone()
     if not row:
         err(f"Deadline {dl_id} not found")
     if row["is_completed"]:
@@ -336,11 +356,10 @@ def complete_deadline(conn, args):
 
     completed_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     now = _now_iso()
-    conn.execute("""
-        UPDATE legalclaw_deadline
-        SET is_completed = 1, completed_date = ?, updated_at = ?
-        WHERE id = ?
-    """, (completed_date, now, dl_id))
+    sql, params = dynamic_update("legalclaw_deadline",
+        {"is_completed": 1, "completed_date": completed_date, "updated_at": now},
+        where={"id": dl_id})
+    conn.execute(sql, params)
     audit(conn, "legalclaw_deadline", dl_id, "legal-complete-deadline",
           getattr(args, "company_id", None))
     conn.commit()

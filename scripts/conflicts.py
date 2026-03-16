@@ -13,11 +13,23 @@ try:
     from erpclaw_lib.db import get_connection
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
-    from erpclaw_lib.query import Q, P, Table, Field, fn, Order, insert_row, update_row
+    from erpclaw_lib.query import (
+        Q, P, Table, Field, fn, Order, LiteralValue,
+        insert_row, update_row, dynamic_update,
+    )
 except ImportError:
     pass
 
 _now_iso = lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+# ── Table aliases ──
+_company = Table("company")
+_party = Table("legalclaw_matter_party")
+_matter = Table("legalclaw_matter")
+_ext = Table("legalclaw_client_ext")
+_cust = Table("customer")
+_cc = Table("legalclaw_conflict_check")
+_cw = Table("legalclaw_conflict_waiver")
 
 
 # ---------------------------------------------------------------------------
@@ -26,7 +38,8 @@ _now_iso = lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 def _validate_company(conn, company_id):
     if not company_id:
         err("--company-id is required")
-    if not conn.execute(Q.from_(Table("company")).select(Field("id")).where(Field("id") == P()).get_sql(), (company_id,)).fetchone():
+    q = Q.from_(_company).select(_company.id).where(_company.id == P())
+    if not conn.execute(q.get_sql(), (company_id,)).fetchone():
         err(f"Company {company_id} not found")
 
 
@@ -44,23 +57,31 @@ def check_conflicts(conn, args):
     matter_id = getattr(args, "matter_id", None)
 
     # Search across all matter parties, clients, and opposing counsel
-    party_matches = conn.execute("""
-        SELECT mp.party_name, mp.party_type, mp.role, mp.matter_id,
-               m.title as matter_title, m.status as matter_status
-        FROM legalclaw_matter_party mp
-        JOIN legalclaw_matter m ON mp.matter_id = m.id
-        WHERE mp.party_name LIKE ? AND mp.company_id = ?
-    """, (f"%{search_name}%", args.company_id)).fetchall()
+    party_q = (
+        Q.from_(_party)
+        .join(_matter).on(_party.matter_id == _matter.id)
+        .select(
+            _party.party_name, _party.party_type, _party.role, _party.matter_id,
+            _matter.title.as_("matter_title"), _matter.status.as_("matter_status"),
+        )
+        .where(_party.party_name.like(P()))
+        .where(_party.company_id == P())
+    )
+    party_matches = conn.execute(party_q.get_sql(), (f"%{search_name}%", args.company_id)).fetchall()
 
-    client_matches = conn.execute("""
-        SELECT ext.id, cust.name, ext.client_type,
-               GROUP_CONCAT(m.title, '; ') as matter_titles
-        FROM legalclaw_client_ext ext
-        JOIN customer cust ON ext.customer_id = cust.id
-        LEFT JOIN legalclaw_matter m ON ext.id = m.client_id
-        WHERE cust.name LIKE ? AND ext.company_id = ?
-        GROUP BY ext.id
-    """, (f"%{search_name}%", args.company_id)).fetchall()
+    client_q = (
+        Q.from_(_ext)
+        .join(_cust).on(_ext.customer_id == _cust.id)
+        .left_join(_matter).on(_ext.id == _matter.client_id)
+        .select(
+            _ext.id, _cust.name, _ext.client_type,
+            LiteralValue("GROUP_CONCAT(\"legalclaw_matter\".\"title\", '; ')").as_("matter_titles"),
+        )
+        .where(_cust.name.like(P()))
+        .where(_ext.company_id == P())
+        .groupby(_ext.id)
+    )
+    client_matches = conn.execute(client_q.get_sql(), (f"%{search_name}%", args.company_id)).fetchall()
 
     matches_found = len(party_matches) + len(client_matches)
     match_details = {
@@ -103,7 +124,8 @@ def add_conflict_waiver(conn, args):
     conflict_check_id = getattr(args, "conflict_check_id", None)
     if not conflict_check_id:
         err("--conflict-check-id is required")
-    check_row = conn.execute(Q.from_(Table("legalclaw_conflict_check")).select(Table("legalclaw_conflict_check").star).where(Field("id") == P()).get_sql(), (conflict_check_id,)).fetchone()
+    q = Q.from_(_cc).select(_cc.star).where(_cc.id == P())
+    check_row = conn.execute(q.get_sql(), (conflict_check_id,)).fetchone()
     if not check_row:
         err(f"Conflict check {conflict_check_id} not found")
 
@@ -124,8 +146,10 @@ def add_conflict_waiver(conn, args):
     ))
 
     # Update conflict check result to waived
-    conn.execute("UPDATE legalclaw_conflict_check SET result = 'waived' WHERE id = ?",
-                 (conflict_check_id,))
+    upd_sql, upd_params = dynamic_update("legalclaw_conflict_check",
+        {"result": "waived"},
+        where={"id": conflict_check_id})
+    conn.execute(upd_sql, upd_params)
 
     audit(conn, "legalclaw_conflict_waiver", waiver_id, "legal-add-conflict-waiver", args.company_id)
     conn.commit()
@@ -137,22 +161,26 @@ def add_conflict_waiver(conn, args):
 # 3. list-conflict-checks
 # ---------------------------------------------------------------------------
 def list_conflict_checks(conn, args):
-    sql = "SELECT * FROM legalclaw_conflict_check WHERE 1=1"
+    conditions = []
     params = []
     if args.company_id:
-        sql += " AND company_id = ?"
+        conditions.append(_cc.company_id == P())
         params.append(args.company_id)
     matter_id = getattr(args, "matter_id", None)
     if matter_id:
-        sql += " AND matter_id = ?"
+        conditions.append(_cc.matter_id == P())
         params.append(matter_id)
     result = getattr(args, "conflict_result", None)
     if result:
-        sql += " AND result = ?"
+        conditions.append(_cc.result == P())
         params.append(result)
-    sql += " ORDER BY checked_date DESC LIMIT ? OFFSET ?"
-    params.extend([args.limit, args.offset])
-    rows = conn.execute(sql, params).fetchall()
+
+    q = Q.from_(_cc).select(_cc.star)
+    for cond in conditions:
+        q = q.where(cond)
+    q = q.orderby(_cc.checked_date, order=Order.desc).limit(P()).offset(P())
+
+    rows = conn.execute(q.get_sql(), params + [args.limit, args.offset]).fetchall()
     ok({"conflict_checks": [row_to_dict(r) for r in rows], "count": len(rows)})
 
 
@@ -162,28 +190,28 @@ def list_conflict_checks(conn, args):
 def conflict_report(conn, args):
     _validate_company(conn, args.company_id)
 
-    total = conn.execute(
-        "SELECT COUNT(*) as cnt FROM legalclaw_conflict_check WHERE company_id = ?",
-        (args.company_id,)
-    ).fetchone()["cnt"]
+    total_q = Q.from_(_cc).select(fn.Count("*").as_("cnt")).where(_cc.company_id == P())
+    total = conn.execute(total_q.get_sql(), (args.company_id,)).fetchone()["cnt"]
 
-    by_result = conn.execute("""
-        SELECT result, COUNT(*) as count
-        FROM legalclaw_conflict_check WHERE company_id = ?
-        GROUP BY result
-    """, (args.company_id,)).fetchall()
+    by_result_q = (
+        Q.from_(_cc)
+        .select(_cc.result, fn.Count("*").as_("count"))
+        .where(_cc.company_id == P())
+        .groupby(_cc.result)
+    )
+    by_result = conn.execute(by_result_q.get_sql(), (args.company_id,)).fetchall()
 
-    waivers = conn.execute(
-        "SELECT COUNT(*) as cnt FROM legalclaw_conflict_waiver WHERE company_id = ?",
-        (args.company_id,)
-    ).fetchone()["cnt"]
+    waivers_q = Q.from_(_cw).select(fn.Count("*").as_("cnt")).where(_cw.company_id == P())
+    waivers = conn.execute(waivers_q.get_sql(), (args.company_id,)).fetchone()["cnt"]
 
-    recent = conn.execute("""
-        SELECT id, search_name, checked_date, matches_found, result
-        FROM legalclaw_conflict_check
-        WHERE company_id = ?
-        ORDER BY checked_date DESC LIMIT 10
-    """, (args.company_id,)).fetchall()
+    recent_q = (
+        Q.from_(_cc)
+        .select(_cc.id, _cc.search_name, _cc.checked_date, _cc.matches_found, _cc.result)
+        .where(_cc.company_id == P())
+        .orderby(_cc.checked_date, order=Order.desc)
+        .limit(10)
+    )
+    recent = conn.execute(recent_q.get_sql(), (args.company_id,)).fetchall()
 
     ok({
         "total_checks": total,

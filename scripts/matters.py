@@ -537,7 +537,7 @@ def matter_summary(conn, args):
         .select(
             fn.Count("*").as_("count"),
             LiteralValue("COALESCE(SUM(CAST(hours AS REAL)), 0)").as_("total_hours"),
-            LiteralValue("COALESCE(SUM(CAST(amount AS REAL)), 0)").as_("total_amount"),
+            LiteralValue("COALESCE(SUM(CAST(amount AS NUMERIC)), 0)").as_("total_amount"),
         )
         .where(_te.matter_id == P())
     )
@@ -547,7 +547,7 @@ def matter_summary(conn, args):
         Q.from_(_te)
         .select(
             fn.Count("*").as_("count"),
-            LiteralValue("COALESCE(SUM(CAST(amount AS REAL)), 0)").as_("total_amount"),
+            LiteralValue("COALESCE(SUM(CAST(amount AS NUMERIC)), 0)").as_("total_amount"),
         )
         .where(_te.matter_id == P())
         .where(_te.is_billed == 0)
@@ -560,7 +560,7 @@ def matter_summary(conn, args):
         Q.from_(_expense)
         .select(
             fn.Count("*").as_("count"),
-            LiteralValue("COALESCE(SUM(CAST(amount AS REAL)), 0)").as_("total_amount"),
+            LiteralValue("COALESCE(SUM(CAST(amount AS NUMERIC)), 0)").as_("total_amount"),
         )
         .where(_expense.matter_id == P())
     )
@@ -570,7 +570,7 @@ def matter_summary(conn, args):
         Q.from_(_expense)
         .select(
             fn.Count("*").as_("count"),
-            LiteralValue("COALESCE(SUM(CAST(amount AS REAL)), 0)").as_("total_amount"),
+            LiteralValue("COALESCE(SUM(CAST(amount AS NUMERIC)), 0)").as_("total_amount"),
         )
         .where(_expense.matter_id == P())
         .where(_expense.is_billed == 0)
@@ -583,8 +583,8 @@ def matter_summary(conn, args):
         Q.from_(_trust_txn)
         .select(
             LiteralValue(
-                "COALESCE(SUM(CASE WHEN transaction_type = 'deposit' THEN CAST(amount AS REAL) ELSE 0 END), 0)"
-                " - COALESCE(SUM(CASE WHEN transaction_type IN ('disbursement','fee') THEN CAST(amount AS REAL) ELSE 0 END), 0)"
+                "COALESCE(SUM(CASE WHEN transaction_type = 'deposit' THEN CAST(amount AS NUMERIC) ELSE 0 END), 0)"
+                " - COALESCE(SUM(CASE WHEN transaction_type IN ('disbursement','fee') THEN CAST(amount AS NUMERIC) ELSE 0 END), 0)"
             ).as_("trust_balance"),
         )
         .where(_trust_txn.matter_id == P())
@@ -605,8 +605,8 @@ def matter_summary(conn, args):
         Q.from_(_inv)
         .select(
             fn.Count("*").as_("count"),
-            LiteralValue("COALESCE(SUM(CAST(total_amount AS REAL)), 0)").as_("total_invoiced"),
-            LiteralValue("COALESCE(SUM(CAST(paid_amount AS REAL)), 0)").as_("total_collected"),
+            LiteralValue("COALESCE(SUM(CAST(total_amount AS NUMERIC)), 0)").as_("total_invoiced"),
+            LiteralValue("COALESCE(SUM(CAST(paid_amount AS NUMERIC)), 0)").as_("total_collected"),
         )
         .where(_inv.matter_id == P())
     )

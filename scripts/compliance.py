@@ -354,7 +354,7 @@ def matter_profitability_report(conn, args):
         time_q = (
             Q.from_(_te)
             .select(
-                LiteralValue("COALESCE(SUM(CAST(amount AS REAL)), 0)").as_("revenue"),
+                LiteralValue("COALESCE(SUM(CAST(amount AS NUMERIC)), 0)").as_("revenue"),
                 LiteralValue("COALESCE(SUM(CAST(hours AS REAL)), 0)").as_("total_hours"),
             )
             .where(_te.matter_id == P())
@@ -363,7 +363,7 @@ def matter_profitability_report(conn, args):
 
         exp_q = (
             Q.from_(_expense)
-            .select(LiteralValue("COALESCE(SUM(CAST(amount AS REAL)), 0)").as_("total_expenses"))
+            .select(LiteralValue("COALESCE(SUM(CAST(amount AS NUMERIC)), 0)").as_("total_expenses"))
             .where(_expense.matter_id == P())
         )
         expense_row = conn.execute(exp_q.get_sql(), (m["id"],)).fetchone()
@@ -412,8 +412,8 @@ def practice_area_analysis(conn, args):
             fn.Count("*").as_("matter_count"),
             LiteralValue("SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END)").as_("active_count"),
             LiteralValue("SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END)").as_("closed_count"),
-            LiteralValue("SUM(CAST(billed_amount AS REAL))").as_("total_billed"),
-            LiteralValue("SUM(CAST(collected_amount AS REAL))").as_("total_collected"),
+            LiteralValue("SUM(CAST(billed_amount AS NUMERIC))").as_("total_billed"),
+            LiteralValue("SUM(CAST(collected_amount AS NUMERIC))").as_("total_collected"),
         )
         .where(_matter.company_id == P())
         .groupby(_matter.practice_area)

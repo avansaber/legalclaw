@@ -25,7 +25,8 @@ REQUIRED_FOUNDATION = [
 def init_legalclaw_schema(db_path=None):
     db_path = db_path or DEFAULT_DB_PATH
     conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA foreign_keys=ON")
+    from erpclaw_lib.db import setup_pragmas
+    setup_pragmas(conn)
 
     # Verify ERPClaw foundation
     tables = [r[0] for r in conn.execute(
@@ -60,8 +61,8 @@ def init_legalclaw_schema(db_path=None):
             billing_rate    TEXT,
             is_active       INTEGER DEFAULT 1,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_legalclaw_client_ext_company
             ON legalclaw_client_ext(company_id);
@@ -87,14 +88,14 @@ def init_legalclaw_schema(db_path=None):
             billed_amount   TEXT NOT NULL DEFAULT '0',
             collected_amount TEXT NOT NULL DEFAULT '0',
             trust_balance   TEXT NOT NULL DEFAULT '0',
-            opened_date     TEXT NOT NULL DEFAULT (date('now')),
+            opened_date     TEXT NOT NULL DEFAULT CURRENT_DATE,
             closed_date     TEXT,
             status          TEXT NOT NULL DEFAULT 'active'
                             CHECK(status IN ('active','pending','on_hold','closed','archived')),
             notes           TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_legalclaw_matter_company
             ON legalclaw_matter(company_id);
@@ -114,7 +115,7 @@ def init_legalclaw_schema(db_path=None):
             contact_info    TEXT,
             notes           TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_legalclaw_matter_party_matter
             ON legalclaw_matter_party(matter_id);
@@ -130,7 +131,7 @@ def init_legalclaw_schema(db_path=None):
             id              TEXT PRIMARY KEY,
             matter_id       TEXT NOT NULL REFERENCES legalclaw_matter(id),
             attorney        TEXT NOT NULL,
-            entry_date      TEXT NOT NULL DEFAULT (date('now')),
+            entry_date      TEXT NOT NULL DEFAULT CURRENT_DATE,
             hours           TEXT NOT NULL DEFAULT '0',
             rate            TEXT NOT NULL DEFAULT '0',
             amount          TEXT NOT NULL DEFAULT '0',
@@ -140,8 +141,8 @@ def init_legalclaw_schema(db_path=None):
             is_billed       INTEGER NOT NULL DEFAULT 0,
             invoice_id      TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_legalclaw_time_entry_matter
             ON legalclaw_time_entry(matter_id);
@@ -153,7 +154,7 @@ def init_legalclaw_schema(db_path=None):
         CREATE TABLE IF NOT EXISTS legalclaw_expense (
             id              TEXT PRIMARY KEY,
             matter_id       TEXT NOT NULL REFERENCES legalclaw_matter(id),
-            expense_date    TEXT NOT NULL DEFAULT (date('now')),
+            expense_date    TEXT NOT NULL DEFAULT CURRENT_DATE,
             amount          TEXT NOT NULL DEFAULT '0',
             category        TEXT NOT NULL DEFAULT 'filing'
                             CHECK(category IN ('filing','courier','copying','expert','travel',
@@ -164,7 +165,7 @@ def init_legalclaw_schema(db_path=None):
             invoice_id      TEXT,
             receipt_reference TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_legalclaw_expense_matter
             ON legalclaw_expense(matter_id);
@@ -176,7 +177,7 @@ def init_legalclaw_schema(db_path=None):
             naming_series   TEXT,
             matter_id       TEXT NOT NULL REFERENCES legalclaw_matter(id),
             client_id       TEXT NOT NULL REFERENCES legalclaw_client_ext(id),
-            invoice_date    TEXT NOT NULL DEFAULT (date('now')),
+            invoice_date    TEXT NOT NULL DEFAULT CURRENT_DATE,
             due_date        TEXT,
             time_amount     TEXT NOT NULL DEFAULT '0',
             expense_amount  TEXT NOT NULL DEFAULT '0',
@@ -190,8 +191,8 @@ def init_legalclaw_schema(db_path=None):
             sales_invoice_id TEXT,
             notes           TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_legalclaw_invoice_matter
             ON legalclaw_invoice(matter_id);
@@ -218,8 +219,8 @@ def init_legalclaw_schema(db_path=None):
             trust_liability_account_id TEXT REFERENCES account(id),
             interest_income_account_id TEXT REFERENCES account(id),
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_legalclaw_trust_account_company
             ON legalclaw_trust_account(company_id);
@@ -230,14 +231,14 @@ def init_legalclaw_schema(db_path=None):
             matter_id           TEXT REFERENCES legalclaw_matter(id),
             transaction_type    TEXT NOT NULL DEFAULT 'deposit'
                                 CHECK(transaction_type IN ('deposit','disbursement','transfer','interest','fee')),
-            transaction_date    TEXT NOT NULL DEFAULT (date('now')),
+            transaction_date    TEXT NOT NULL DEFAULT CURRENT_DATE,
             amount              TEXT NOT NULL DEFAULT '0',
             reference           TEXT,
             payee               TEXT,
             description         TEXT,
             gl_entry_ids        TEXT,
             company_id          TEXT NOT NULL REFERENCES company(id),
-            created_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_legalclaw_trust_txn_account
             ON legalclaw_trust_transaction(trust_account_id);
@@ -265,8 +266,8 @@ def init_legalclaw_schema(db_path=None):
             filed_date      TEXT,
             court_reference TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_legalclaw_document_matter
             ON legalclaw_document(matter_id);
@@ -296,8 +297,8 @@ def init_legalclaw_schema(db_path=None):
             status          TEXT NOT NULL DEFAULT 'scheduled'
                             CHECK(status IN ('scheduled','completed','cancelled','postponed')),
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_legalclaw_event_matter
             ON legalclaw_calendar_event(matter_id);
@@ -317,8 +318,8 @@ def init_legalclaw_schema(db_path=None):
             completed_date  TEXT,
             notes           TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT DEFAULT (datetime('now')),
-            updated_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_legalclaw_deadline_matter
             ON legalclaw_deadline(matter_id);
@@ -335,7 +336,7 @@ def init_legalclaw_schema(db_path=None):
         CREATE TABLE IF NOT EXISTS legalclaw_conflict_check (
             id              TEXT PRIMARY KEY,
             search_name     TEXT NOT NULL,
-            checked_date    TEXT NOT NULL DEFAULT (date('now')),
+            checked_date    TEXT NOT NULL DEFAULT CURRENT_DATE,
             checked_by      TEXT,
             matches_found   INTEGER NOT NULL DEFAULT 0,
             match_details   TEXT,
@@ -343,7 +344,7 @@ def init_legalclaw_schema(db_path=None):
                             CHECK(result IN ('clear','conflict','potential','waived')),
             matter_id       TEXT REFERENCES legalclaw_matter(id),
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_legalclaw_conflict_search
             ON legalclaw_conflict_check(search_name);
@@ -353,10 +354,10 @@ def init_legalclaw_schema(db_path=None):
             conflict_check_id TEXT NOT NULL REFERENCES legalclaw_conflict_check(id),
             matter_id       TEXT REFERENCES legalclaw_matter(id),
             waived_by       TEXT NOT NULL,
-            waiver_date     TEXT NOT NULL DEFAULT (date('now')),
+            waiver_date     TEXT NOT NULL DEFAULT CURRENT_DATE,
             reason          TEXT,
             company_id      TEXT NOT NULL REFERENCES company(id),
-            created_at      TEXT DEFAULT (datetime('now'))
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_legalclaw_waiver_check
             ON legalclaw_conflict_waiver(conflict_check_id);
@@ -378,8 +379,8 @@ def init_legalclaw_schema(db_path=None):
             cle_hours_required  TEXT DEFAULT '0',
             cle_hours_completed TEXT DEFAULT '0',
             company_id          TEXT NOT NULL REFERENCES company(id),
-            created_at          TEXT DEFAULT (datetime('now')),
-            updated_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_legalclaw_bar_attorney
             ON legalclaw_bar_admission(attorney_name);
@@ -399,7 +400,7 @@ def init_legalclaw_schema(db_path=None):
                                       'substance_abuse','other')),
             certificate_number  TEXT,
             company_id          TEXT NOT NULL REFERENCES company(id),
-            created_at          TEXT DEFAULT (datetime('now'))
+            created_at          TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_legalclaw_cle_attorney
             ON legalclaw_cle_record(attorney_name);

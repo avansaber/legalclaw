@@ -752,8 +752,8 @@ def billable_utilization_report(conn, args):
             LiteralValue("SUM(CAST(hours AS REAL))").as_("total_hours"),
             LiteralValue("SUM(CASE WHEN is_billable = 1 THEN CAST(hours AS REAL) ELSE 0 END)").as_("billable_hours"),
             LiteralValue("SUM(CASE WHEN is_billable = 0 THEN CAST(hours AS REAL) ELSE 0 END)").as_("non_billable_hours"),
-            LiteralValue("SUM(CASE WHEN is_billable = 1 THEN CAST(amount AS REAL) ELSE 0 END)").as_("billable_amount"),
-            LiteralValue("SUM(CASE WHEN is_billed = 1 THEN CAST(amount AS REAL) ELSE 0 END)").as_("billed_amount"),
+            LiteralValue("SUM(CASE WHEN is_billable = 1 THEN CAST(amount AS NUMERIC) ELSE 0 END)").as_("billable_amount"),
+            LiteralValue("SUM(CASE WHEN is_billed = 1 THEN CAST(amount AS NUMERIC) ELSE 0 END)").as_("billed_amount"),
             fn.Count("*").as_("entry_count"),
         )
         .where(_te.company_id == P())
@@ -803,7 +803,7 @@ def ar_aging_report(conn, args):
         )
         .where(i.company_id == P())
         .where(i.status.isin(["sent", "partially_paid", "overdue"]))
-        .where(LiteralValue("CAST(\"balance\" AS REAL)") > 0)
+        .where(LiteralValue("CAST(\"balance\" AS NUMERIC)") > 0)
         .orderby(i.invoice_date, order=Order.asc)
     )
     rows = conn.execute(q.get_sql(), (args.company_id,)).fetchall()

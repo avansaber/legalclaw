@@ -406,6 +406,128 @@ def init_legalclaw_schema(db_path=None):
             ON legalclaw_cle_record(attorney_name);
         CREATE INDEX IF NOT EXISTS idx_legalclaw_cle_bar
             ON legalclaw_cle_record(bar_admission_id);
+
+
+
+        -- ==========================================================
+        -- DOMAIN 8: CLIENT INTAKE (1 table)
+        -- ==========================================================
+
+        CREATE TABLE IF NOT EXISTS legalclaw_intake (
+            id                  TEXT PRIMARY KEY,
+            contact_name        TEXT NOT NULL,
+            contact_email       TEXT,
+            contact_phone       TEXT,
+            inquiry_type        TEXT,
+            practice_area       TEXT,
+            description         TEXT,
+            urgency             TEXT DEFAULT 'normal'
+                                CHECK(urgency IN ('low','normal','high','urgent')),
+            source              TEXT,
+            conflict_checked    INTEGER DEFAULT 0,
+            conflict_result     TEXT,
+            assigned_to         TEXT,
+            converted_matter_id TEXT,
+            status              TEXT DEFAULT 'new'
+                                CHECK(status IN ('new','contacted','qualified','converted','declined','lost')),
+            company_id          TEXT NOT NULL REFERENCES company(id),
+            created_at          TEXT DEFAULT (datetime('now')),
+            updated_at          TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_legalclaw_intake_company
+            ON legalclaw_intake(company_id);
+        CREATE INDEX IF NOT EXISTS idx_legalclaw_intake_status
+            ON legalclaw_intake(status);
+        CREATE INDEX IF NOT EXISTS idx_legalclaw_intake_name
+            ON legalclaw_intake(contact_name);
+
+
+        -- ==========================================================
+        -- DOMAIN 9: TASK TEMPLATES (2 tables)
+        -- ==========================================================
+
+        CREATE TABLE IF NOT EXISTS legalclaw_task_template (
+            id                  TEXT PRIMARY KEY,
+            name                TEXT NOT NULL,
+            practice_area       TEXT,
+            description         TEXT,
+            task_count          INTEGER DEFAULT 0,
+            company_id          TEXT NOT NULL REFERENCES company(id),
+            created_at          TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_legalclaw_tmpl_company
+            ON legalclaw_task_template(company_id);
+
+        CREATE TABLE IF NOT EXISTS legalclaw_task_template_item (
+            id                  TEXT PRIMARY KEY,
+            template_id         TEXT NOT NULL REFERENCES legalclaw_task_template(id),
+            task_name           TEXT NOT NULL,
+            description         TEXT,
+            due_days_offset     INTEGER DEFAULT 0,
+            assigned_role       TEXT,
+            predecessor_item_id TEXT,
+            is_required         INTEGER DEFAULT 1,
+            sort_order          INTEGER DEFAULT 0,
+            created_at          TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_legalclaw_tmpl_item_tmpl
+            ON legalclaw_task_template_item(template_id);
+
+
+        -- ==========================================================
+        -- DOMAIN 10: SETTLEMENT / CONTINGENCY FEE (1 table)
+        -- ==========================================================
+
+        CREATE TABLE IF NOT EXISTS legalclaw_settlement (
+            id                  TEXT PRIMARY KEY,
+            matter_id           TEXT NOT NULL REFERENCES legalclaw_matter(id),
+            settlement_date     TEXT NOT NULL,
+            gross_amount        TEXT NOT NULL DEFAULT '0',
+            contingency_pct     TEXT NOT NULL DEFAULT '0',
+            attorney_fee        TEXT DEFAULT '0',
+            costs_advanced      TEXT DEFAULT '0',
+            net_to_client       TEXT DEFAULT '0',
+            payment_method      TEXT,
+            notes               TEXT,
+            status              TEXT DEFAULT 'pending'
+                                CHECK(status IN ('pending','disbursed','completed')),
+            company_id          TEXT NOT NULL REFERENCES company(id),
+            created_at          TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_legalclaw_settlement_matter
+            ON legalclaw_settlement(matter_id);
+        CREATE INDEX IF NOT EXISTS idx_legalclaw_settlement_company
+            ON legalclaw_settlement(company_id);
+        CREATE INDEX IF NOT EXISTS idx_legalclaw_settlement_status
+            ON legalclaw_settlement(status);
+
+
+        -- ==========================================================
+        -- DOMAIN 11: COMMUNICATION LOG (1 table)
+        -- ==========================================================
+
+        CREATE TABLE IF NOT EXISTS legalclaw_communication (
+            id                  TEXT PRIMARY KEY,
+            matter_id           TEXT NOT NULL REFERENCES legalclaw_matter(id),
+            client_id           TEXT,
+            comm_type           TEXT NOT NULL
+                                CHECK(comm_type IN ('email','phone','meeting','letter','text','portal')),
+            direction           TEXT CHECK(direction IN ('inbound','outbound')),
+            subject             TEXT,
+            summary             TEXT,
+            duration_minutes    INTEGER,
+            participants        TEXT,
+            date                TEXT NOT NULL,
+            logged_by           TEXT,
+            company_id          TEXT NOT NULL REFERENCES company(id),
+            created_at          TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_legalclaw_comm_matter
+            ON legalclaw_communication(matter_id);
+        CREATE INDEX IF NOT EXISTS idx_legalclaw_comm_type
+            ON legalclaw_communication(comm_type);
+        CREATE INDEX IF NOT EXISTS idx_legalclaw_comm_date
+            ON legalclaw_communication(date);
     """)
 
     conn.commit()

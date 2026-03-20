@@ -40,6 +40,7 @@ from calendar import ACTIONS as CALENDAR_ACTIONS
 from conflicts import ACTIONS as CONFLICTS_ACTIONS
 from compliance import ACTIONS as COMPLIANCE_ACTIONS
 from ledes import ACTIONS as LEDES_ACTIONS
+from intake import ACTIONS as INTAKE_ACTIONS
 
 # ---------------------------------------------------------------------------
 # Merge all domain actions into one router
@@ -56,6 +57,7 @@ ACTIONS.update(CALENDAR_ACTIONS)
 ACTIONS.update(CONFLICTS_ACTIONS)
 ACTIONS.update(COMPLIANCE_ACTIONS)
 ACTIONS.update(LEDES_ACTIONS)
+ACTIONS.update(INTAKE_ACTIONS)
 
 
 def main():
@@ -189,6 +191,48 @@ def main():
     parser.add_argument("--cle-hours")
     parser.add_argument("--cle-category")
     parser.add_argument("--certificate-number")
+
+    # == INTAKE domain ==
+    parser.add_argument("--intake-id")
+    parser.add_argument("--intake-status")
+    parser.add_argument("--contact-name")
+    parser.add_argument("--contact-email")
+    parser.add_argument("--contact-phone")
+    parser.add_argument("--inquiry-type")
+    parser.add_argument("--urgency")
+    parser.add_argument("--source")
+
+    # == TASK TEMPLATES domain ==
+    parser.add_argument("--template-id")
+    parser.add_argument("--task-name")
+    parser.add_argument("--due-days-offset")
+    parser.add_argument("--assigned-role")
+    parser.add_argument("--predecessor-item-id")
+    parser.add_argument("--is-required")
+    parser.add_argument("--sort-order")
+
+    # == SETTLEMENT / CONTINGENCY ==
+    parser.add_argument("--settlement-id")
+    parser.add_argument("--settlement-date")
+    parser.add_argument("--gross-amount")
+    parser.add_argument("--contingency-pct")
+    parser.add_argument("--costs-advanced")
+    parser.add_argument("--payment-method")
+
+    # == COMMUNICATION LOG ==
+    parser.add_argument("--comm-type")
+    parser.add_argument("--direction")
+    parser.add_argument("--subject")
+    parser.add_argument("--summary")
+    parser.add_argument("--duration-minutes")
+    parser.add_argument("--participants")
+    parser.add_argument("--comm-date")
+    parser.add_argument("--logged-by")
+
+    # == SOL Calculator ==
+    parser.add_argument("--claim-type")
+    parser.add_argument("--incident-date")
+    parser.add_argument("--reminder-days")
 
     args, unknown = parser.parse_known_args()
     check_unknown_args(parser, unknown)

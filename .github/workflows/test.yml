@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: '3.10'
       - name: Install pytest
-        run: pip install pytest
+        run: pip install pytest pypika
       - name: Setup erpclaw_lib and init_schema
         run: |
           git clone --depth 1 --filter=blob:none --sparse \

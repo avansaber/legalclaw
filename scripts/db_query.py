@@ -39,6 +39,7 @@ from documents import ACTIONS as DOCUMENTS_ACTIONS
 from calendar import ACTIONS as CALENDAR_ACTIONS
 from conflicts import ACTIONS as CONFLICTS_ACTIONS
 from compliance import ACTIONS as COMPLIANCE_ACTIONS
+from ledes import ACTIONS as LEDES_ACTIONS
 
 # ---------------------------------------------------------------------------
 # Merge all domain actions into one router
@@ -54,6 +55,7 @@ ACTIONS.update(DOCUMENTS_ACTIONS)
 ACTIONS.update(CALENDAR_ACTIONS)
 ACTIONS.update(CONFLICTS_ACTIONS)
 ACTIONS.update(COMPLIANCE_ACTIONS)
+ACTIONS.update(LEDES_ACTIONS)
 
 
 def main():

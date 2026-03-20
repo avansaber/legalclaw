@@ -515,6 +515,18 @@ def generate_invoice(conn, args):
         result["sales_invoice_id"] = sales_invoice_id
     if cross_skill_error:
         result["cross_skill_warning"] = cross_skill_error
+
+    # Generate LEDES output when format is 'ledes'
+    if inv_format == "ledes":
+        try:
+            from ledes import generate_ledes_output
+            ledes_result = generate_ledes_output(conn, inv_id)
+            if "ledes_output" in ledes_result:
+                result["ledes_output"] = ledes_result["ledes_output"]
+                result["ledes_format"] = "LEDES1998B"
+        except (ImportError, Exception):
+            result["ledes_warning"] = "LEDES generation deferred — use legal-generate-invoice-ledes"
+
     ok(result)
 
 

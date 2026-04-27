@@ -29,7 +29,7 @@ MODULE_DIR = os.path.dirname(SCRIPTS_DIR)          # legalclaw/
 INIT_DB_PATH = os.path.join(MODULE_DIR, "init_db.py")
 
 # Foundation init_schema.py (erpclaw-setup)
-SRC_DIR = os.path.dirname(MODULE_DIR)              # src/
+SRC_DIR = os.path.dirname(MODULE_DIR)              # source/
 ERPCLAW_DIR = os.path.join(SRC_DIR, "erpclaw", "scripts", "erpclaw-setup")
 INIT_SCHEMA_PATH = os.path.join(ERPCLAW_DIR, "init_schema.py")
 

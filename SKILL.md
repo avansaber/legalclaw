@@ -1,7 +1,7 @@
 ---
 name: legalclaw
 version: 1.0.0
-description: Legal Practice Management -- matters, time & billing, trust accounting, documents, calendar, conflicts, compliance. 69 actions across 7 domains with IOLTA trust accounting, CLE compliance tracking, conflict checking, and profitability reporting. Built on ERPClaw foundation.
+description: Legal Practice Management -- 99 actions across 9 domains. Matters, time & billing, trust/IOLTA accounting, documents, calendar/deadlines, conflicts, compliance, intake, LEDES billing, portal, and analytics.
 author: AvanSaber
 homepage: https://github.com/avansaber/legalclaw
 source: https://github.com/avansaber/legalclaw
@@ -10,7 +10,7 @@ category: legal
 requires: [erpclaw]
 database: ~/.openclaw/erpclaw/data.sqlite
 user-invocable: true
-tags: [legalclaw, legal, law, matter, case, client, attorney, billing, trust, iolta, escrow, invoice, time-entry, expense, document, deadline, calendar, conflict, bar, cle, compliance, profitability, litigation, corporate]
+tags: [legalclaw, legal, law, matter, case, client, attorney, billing, trust, iolta, escrow, invoice, time-entry, expense, document, deadline, calendar, conflict, bar, cle, compliance, ledes, intake, portal, settlement, contingency]
 scripts:
   - scripts/db_query.py
 metadata: {"openclaw":{"type":"executable","install":{"post":"python3 scripts/db_query.py --action status"},"requires":{"bins":["python3"],"env":[],"optionalEnv":["ERPCLAW_DB_PATH"]},"os":["darwin","linux"]}}
@@ -18,188 +18,179 @@ metadata: {"openclaw":{"type":"executable","install":{"post":"python3 scripts/db
 
 # legalclaw
 
-You are a Legal Practice Administrator for LegalClaw, an AI-native legal practice management system built on ERPClaw.
-You manage the full legal workflow: client intake, matter management, time tracking, expense recording,
-invoice generation, IOLTA/escrow trust accounting, legal document management, court calendar and deadlines,
-conflict of interest checking, bar admission tracking, CLE compliance, and practice analytics.
-All financial data uses Decimal precision. Trust accounts enforce balance sufficiency checks.
-
-## Security Model
-
-- **Local-only**: All data stored in `~/.openclaw/erpclaw/data.sqlite`
-- **No credentials required**: Uses erpclaw_lib shared library (installed by erpclaw)
-- **Zero network calls**: No external API calls, no telemetry, no cloud dependencies
-- **SQL injection safe**: All queries use parameterized statements
-- **Trust accounting safeguards**: Disbursements check sufficient balance, all transactions recorded
+Legal Practice Administrator for LegalClaw -- AI-native legal practice management on ERPClaw.
+Manages client intake, matters, time tracking, expense recording, invoice generation,
+IOLTA/escrow trust accounting, legal documents, court calendar/deadlines, conflict checking,
+bar admissions, CLE compliance, LEDES billing, client portal, settlements, and analytics.
+All financials use Decimal precision. Trust disbursements enforce balance checks.
 
 ### Skill Activation Triggers
 
-Activate this skill when the user mentions: law firm, attorney, lawyer, legal, matter, case,
-client intake, retainer, billable hours, time entry, trust account, IOLTA, escrow, legal document,
-court filing, deadline, statute of limitations, conflict check, bar admission, CLE, compliance,
-deposition, hearing, trial, invoice, billing, opposing counsel.
+Activate when user mentions: law firm, attorney, lawyer, legal, matter, case, client intake,
+retainer, billable hours, time entry, trust account, IOLTA, escrow, legal document, court filing,
+deadline, statute of limitations, conflict check, bar admission, CLE, compliance, deposition,
+hearing, trial, invoice, billing, opposing counsel, LEDES, settlement, contingency.
 
-### Setup (First Use Only)
-
-If the database does not exist or you see "no such table" errors:
+### Setup
 ```
 python3 {baseDir}/../erpclaw/scripts/erpclaw-setup/db_query.py --action initialize-database
 python3 {baseDir}/init_db.py
 python3 {baseDir}/scripts/db_query.py --action status
 ```
 
-## Quick Start (Tier 1)
-
-**1. Register a client and create a matter:**
+## Quick Start
 ```
 --action legal-add-client --company-id {id} --name "Acme Corp" --client-type business --billing-rate "350.00"
 --action legal-add-matter --company-id {id} --client-id {id} --title "Contract Dispute" --practice-area litigation --billing-method hourly --billing-rate "400.00"
-```
-
-**2. Track time and expenses:**
-```
---action legal-add-time-entry --company-id {id} --matter-id {id} --attorney "Jane Smith" --hours "2.5" --te-description "Research case precedents" --rate "400.00"
---action legal-add-expense --company-id {id} --matter-id {id} --expense-amount "150.00" --category filing --expense-description "Court filing fee"
-```
-
-**3. Generate and send invoice:**
-```
+--action legal-add-time-entry --company-id {id} --matter-id {id} --attorney "Jane Smith" --hours "2.5" --te-description "Research" --rate "400.00"
 --action legal-generate-invoice --company-id {id} --matter-id {id}
---action legal-send-invoice --invoice-id {id}
---action legal-record-payment --invoice-id {id} --payment-amount "1150.00"
-```
-
-**4. Manage trust account:**
-```
---action legal-add-trust-account --company-id {id} --trust-name "Client Trust IOLTA" --account-type iolta
 --action legal-deposit-trust --company-id {id} --trust-account-id {id} --matter-id {id} --amount "5000.00"
---action legal-disburse-trust --company-id {id} --trust-account-id {id} --matter-id {id} --amount "1200.00" --payee "Expert Witness LLC"
 ```
 
-## All Actions (Tier 2)
+## All 99 Actions
 
-For all actions: `python3 {baseDir}/scripts/db_query.py --action <action> [flags]`
-
-### Matters (14 actions)
-| Action | Required Flags | Optional Flags |
-|--------|---------------|----------------|
-| `legal-add-client` | `--company-id --name` | `--client-type --email --phone --address --tax-id --billing-rate` |
-| `legal-update-client` | `--client-id` | `--name --client-type --email --phone --address --tax-id --billing-rate --is-active` |
-| `legal-get-client` | `--client-id` | |
-| `legal-list-clients` | | `--company-id --search --is-active --limit --offset` |
-| `legal-add-matter` | `--company-id --client-id --title` | `--practice-area --billing-method --billing-rate --budget --lead-attorney --description --opened-date --notes` |
-| `legal-update-matter` | `--matter-id` | `--title --practice-area --billing-method --billing-rate --budget --lead-attorney --description --matter-status --notes` |
-| `legal-get-matter` | `--matter-id` | |
-| `legal-list-matters` | | `--company-id --client-id --matter-status --practice-area --search --limit --offset` |
-| `legal-add-matter-party` | `--company-id --matter-id --party-name` | `--party-type --role --contact-info --notes` |
-| `legal-list-matter-parties` | | `--matter-id --party-type --limit --offset` |
-| `legal-close-matter` | `--matter-id` | `--closed-date` |
-| `legal-reopen-matter` | `--matter-id` | |
-| `legal-matter-summary` | `--matter-id` | |
-| `legal-client-portfolio` | `--client-id` | |
+### Matters & Clients (14 actions)
+| Action | Description |
+|--------|-------------|
+| `legal-add-client` | Add client |
+| `legal-update-client` | Update client |
+| `legal-get-client` | Get client details |
+| `legal-list-clients` | List clients |
+| `legal-add-matter` | Create matter/case |
+| `legal-update-matter` | Update matter |
+| `legal-get-matter` | Get matter details |
+| `legal-list-matters` | List matters |
+| `legal-add-matter-party` | Add party to matter |
+| `legal-list-matter-parties` | List matter parties |
+| `legal-close-matter` | Close matter |
+| `legal-reopen-matter` | Reopen matter |
+| `legal-matter-summary` | Matter summary with financials |
+| `legal-client-portfolio` | Client portfolio overview |
 
 ### Time & Billing (14 actions)
-| Action | Required Flags | Optional Flags |
-|--------|---------------|----------------|
-| `legal-add-time-entry` | `--company-id --matter-id --attorney --te-description` | `--hours --rate --entry-date --utbms-code --is-billable` |
-| `legal-update-time-entry` | `--time-entry-id` | `--attorney --hours --rate --te-description --entry-date --utbms-code --is-billable` |
-| `legal-list-time-entries` | | `--matter-id --attorney --is-billed --is-billable --limit --offset` |
-| `legal-add-expense` | `--company-id --matter-id --expense-amount` | `--category --expense-date --expense-description --is-billable --receipt-reference` |
-| `legal-update-expense` | `--expense-id` | `--expense-amount --category --expense-date --expense-description --is-billable --receipt-reference` |
-| `legal-list-expenses` | | `--matter-id --category --is-billed --limit --offset` |
-| `legal-generate-invoice` | `--company-id --matter-id` | `--invoice-date --due-date --invoice-format --notes` |
-| `legal-get-invoice` | `--invoice-id` | |
-| `legal-list-invoices` | | `--matter-id --client-id --invoice-status --company-id --limit --offset` |
-| `legal-send-invoice` | `--invoice-id` | |
-| `legal-record-payment` | `--invoice-id --payment-amount` | |
-| `legal-write-off-invoice` | `--invoice-id` | |
-| `legal-billable-utilization-report` | `--company-id` | |
-| `legal-ar-aging-report` | `--company-id` | |
+| Action | Description |
+|--------|-------------|
+| `legal-add-time-entry` | Log billable time |
+| `legal-update-time-entry` | Update time entry |
+| `legal-list-time-entries` | List time entries |
+| `legal-add-expense` | Record expense |
+| `legal-update-expense` | Update expense |
+| `legal-list-expenses` | List expenses |
+| `legal-generate-invoice` | Generate invoice from unbilled |
+| `legal-get-invoice` | Get invoice details |
+| `legal-list-invoices` | List invoices |
+| `legal-send-invoice` | Send/submit invoice |
+| `legal-record-payment` | Record invoice payment |
+| `legal-write-off-invoice` | Write off invoice |
+| `legal-billable-utilization-report` | Billable utilization |
+| `legal-ar-aging-report` | AR aging report |
 
 ### Trust Accounting (10 actions)
-| Action | Required Flags | Optional Flags |
-|--------|---------------|----------------|
-| `legal-add-trust-account` | `--company-id --trust-name` | `--account-type --bank-name --account-number` |
-| `legal-get-trust-account` | `--trust-account-id` | |
-| `legal-list-trust-accounts` | | `--company-id --account-type --limit --offset` |
-| `legal-deposit-trust` | `--company-id --trust-account-id --amount` | `--matter-id --transaction-date --reference --payee --trust-description` |
-| `legal-disburse-trust` | `--company-id --trust-account-id --amount --payee` | `--matter-id --transaction-date --reference --trust-description` |
-| `legal-transfer-trust` | `--company-id --trust-account-id --to-trust-account-id --amount` | `--transaction-date --reference` |
-| `legal-list-trust-transactions` | | `--trust-account-id --matter-id --transaction-type --limit --offset` |
-| `legal-trust-reconciliation` | `--trust-account-id` | |
-| `legal-trust-balance-report` | `--company-id` | |
-| `legal-trust-interest-distribution` | `--company-id --trust-account-id --amount` | `--transaction-date --reference` |
+| Action | Description |
+|--------|-------------|
+| `legal-add-trust-account` | Create trust/IOLTA account |
+| `legal-get-trust-account` | Get trust account |
+| `legal-list-trust-accounts` | List trust accounts |
+| `legal-deposit-trust` | Deposit to trust |
+| `legal-disburse-trust` | Disburse from trust |
+| `legal-transfer-trust` | Transfer between trust accounts |
+| `legal-list-trust-transactions` | List trust transactions |
+| `legal-trust-reconciliation` | Reconcile trust account |
+| `legal-trust-balance-report` | Trust balance report |
+| `legal-trust-interest-distribution` | Distribute trust interest |
 
 ### Documents (10 actions)
-| Action | Required Flags | Optional Flags |
-|--------|---------------|----------------|
-| `legal-add-legal-document` | `--company-id --doc-title` | `--matter-id --document-type --file-name --content --court-reference` |
-| `legal-update-legal-document` | `--document-id` | `--doc-title --document-type --file-name --content --court-reference --document-status` |
-| `legal-get-legal-document` | `--document-id` | |
-| `legal-list-legal-documents` | | `--matter-id --document-type --document-status --company-id --limit --offset` |
-| `legal-file-document` | `--document-id` | `--filed-date --court-reference` |
-| `legal-archive-document` | `--document-id` | |
-| `legal-search-legal-documents` | `--search` | `--matter-id --document-type --company-id --limit --offset` |
-| `legal-add-document-version` | `--document-id` | `--content` |
-| `legal-list-document-versions` | `--document-id` | |
-| `legal-document-index` | `--matter-id` | |
+| Action | Description |
+|--------|-------------|
+| `legal-add-legal-document` | Add legal document |
+| `legal-update-legal-document` | Update document |
+| `legal-get-legal-document` | Get document |
+| `legal-list-legal-documents` | List documents |
+| `legal-file-document` | File document with court |
+| `legal-archive-document` | Archive document |
+| `legal-search-legal-documents` | Search documents |
+| `legal-add-document-version` | Add document version |
+| `legal-list-document-versions` | List document versions |
+| `legal-document-index` | Document index for matter |
 
 ### Calendar & Deadlines (8 actions)
-| Action | Required Flags | Optional Flags |
-|--------|---------------|----------------|
-| `legal-add-calendar-event` | `--company-id --event-title --event-date` | `--matter-id --event-type --event-time --location --event-description --reminder-days --is-critical` |
-| `legal-update-calendar-event` | `--event-id` | `--event-title --event-type --event-date --event-time --location --event-description --event-status --reminder-days --is-critical` |
-| `legal-list-calendar-events` | | `--matter-id --event-type --event-status --company-id --limit --offset` |
-| `legal-complete-event` | `--event-id` | |
-| `legal-add-deadline` | `--company-id --matter-id --deadline-title --due-date` | `--deadline-type --is-court-imposed --assigned-to --notes` |
-| `legal-update-deadline` | `--deadline-id` | `--deadline-title --deadline-type --due-date --is-court-imposed --assigned-to --notes` |
-| `legal-list-deadlines` | | `--matter-id --deadline-type --is-completed --company-id --limit --offset` |
-| `legal-complete-deadline` | `--deadline-id` | |
+| Action | Description |
+|--------|-------------|
+| `legal-add-calendar-event` | Add calendar event |
+| `legal-update-calendar-event` | Update event |
+| `legal-list-calendar-events` | List events |
+| `legal-complete-event` | Complete event |
+| `legal-add-deadline` | Add deadline |
+| `legal-update-deadline` | Update deadline |
+| `legal-list-deadlines` | List deadlines |
+| `legal-complete-deadline` | Complete deadline |
 
 ### Conflicts (4 actions)
-| Action | Required Flags | Optional Flags |
-|--------|---------------|----------------|
-| `legal-check-conflicts` | `--company-id --search-name` | `--matter-id --checked-by` |
-| `legal-add-conflict-waiver` | `--company-id --conflict-check-id --waived-by` | `--matter-id --waiver-reason` |
-| `legal-list-conflict-checks` | | `--company-id --matter-id --conflict-result --limit --offset` |
-| `legal-conflict-report` | `--company-id` | |
+| Action | Description |
+|--------|-------------|
+| `legal-check-conflicts` | Run conflict check |
+| `legal-add-conflict-waiver` | Add conflict waiver |
+| `legal-list-conflict-checks` | List conflict checks |
+| `legal-conflict-report` | Conflict report |
 
-### Compliance & Reports (9 actions)
-| Action | Required Flags | Optional Flags |
-|--------|---------------|----------------|
-| `legal-add-bar-admission` | `--company-id --attorney-name --jurisdiction` | `--bar-number --admission-date --expiry-date --admission-status --cle-hours-required` |
-| `legal-update-bar-admission` | `--bar-admission-id` | `--attorney-name --bar-number --jurisdiction --admission-date --expiry-date --admission-status --cle-hours-required` |
-| `legal-list-bar-admissions` | | `--company-id --attorney-name --admission-status --jurisdiction --limit --offset` |
-| `legal-add-cle-record` | `--company-id --attorney-name --course-name --completion-date` | `--bar-admission-id --cle-provider --cle-hours --cle-category --certificate-number` |
-| `legal-list-cle-records` | | `--company-id --attorney-name --bar-admission-id --cle-category --limit --offset` |
-| `legal-cle-compliance-report` | `--company-id` | |
-| `legal-matter-profitability-report` | `--company-id` | |
-| `legal-practice-area-analysis` | `--company-id` | |
-| `status` | | |
+### Intake (5 actions)
+| Action | Description |
+|--------|-------------|
+| `legal-add-intake` | Create client intake |
+| `legal-update-intake` | Update intake |
+| `legal-list-intakes` | List intakes |
+| `legal-convert-intake-to-matter` | Convert intake to matter |
+| `legal-intake-conversion-report` | Intake conversion report |
 
-### Quick Command Reference
-| User Says | Action |
-|-----------|--------|
-| "Add a new client" | `legal-add-client` |
-| "Open a new matter" | `legal-add-matter` |
-| "Log billable time" | `legal-add-time-entry` |
-| "Record an expense" | `legal-add-expense` |
-| "Generate an invoice" | `legal-generate-invoice` |
-| "Make a trust deposit" | `legal-deposit-trust` |
-| "File a document" | `legal-file-document` |
-| "Add a court deadline" | `legal-add-deadline` |
-| "Run a conflict check" | `legal-check-conflicts` |
-| "Check CLE compliance" | `legal-cle-compliance-report` |
-| "Matter profitability" | `legal-matter-profitability-report` |
+### Compliance (9 actions)
+| Action | Description |
+|--------|-------------|
+| `legal-add-bar-admission` | Add bar admission |
+| `legal-update-bar-admission` | Update bar admission |
+| `legal-list-bar-admissions` | List bar admissions |
+| `legal-add-cle-record` | Add CLE credit |
+| `legal-list-cle-records` | List CLE records |
+| `legal-cle-compliance-report` | CLE compliance report |
+| `legal-matter-profitability-report` | Matter profitability |
+| `legal-practice-area-analysis` | Practice area analysis |
+| `legal-communication-summary-report` | Communication summary |
+
+### LEDES & Advanced Billing (7 actions)
+| Action | Description |
+|--------|-------------|
+| `legal-generate-invoice-ledes` | Generate LEDES invoice |
+| `legal-validate-ledes` | Validate LEDES format |
+| `legal-calculate-contingency-fee` | Calculate contingency fee |
+| `legal-calculate-sol` | Calculate statute of limitations |
+| `legal-list-approaching-sol` | List approaching SOL |
+| `legal-check-retainer-balance` | Check retainer balance |
+| `legal-set-retainer-threshold` | Set retainer threshold |
+
+### Advanced Features (9 actions)
+| Action | Description |
+|--------|-------------|
+| `legal-generate-replenishment-request` | Generate retainer replenishment |
+| `legal-record-settlement` | Record settlement |
+| `legal-disburse-settlement` | Disburse settlement funds |
+| `legal-settlement-report` | Settlement report |
+| `legal-add-communication` | Log communication |
+| `legal-list-communications` | List communications |
+| `legal-communication-timeline` | Communication timeline |
+| `legal-add-task-template` | Create task template |
+| `legal-get-task-template` | Get task template |
+
+### Portal & Templates (9 actions)
+| Action | Description |
+|--------|-------------|
+| `legal-list-task-templates` | List task templates |
+| `legal-add-task-template-item` | Add template item |
+| `legal-apply-task-template` | Apply template to matter |
+| `legal-portal-matter-status` | Client views matter status |
+| `legal-portal-list-documents` | Client views documents |
+| `legal-portal-list-invoices` | Client views invoices |
+| `legal-portal-list-trust-activity` | Client views trust activity |
+| `legal-portal-send-message` | Client sends message |
+| `legal-portal-upload-document` | Client uploads document |
 
 ## Technical Details (Tier 3)
-
-**Tables owned (16):** legalclaw_client_ext (FKs to core customer), legalclaw_matter, legalclaw_matter_party, legalclaw_time_entry, legalclaw_expense, legalclaw_invoice (with sales_invoice_id FK to core), legalclaw_trust_account, legalclaw_trust_transaction, legalclaw_document, legalclaw_calendar_event, legalclaw_deadline, legalclaw_conflict_check, legalclaw_conflict_waiver, legalclaw_bar_admission, legalclaw_cle_record
-
-**Script:** `scripts/db_query.py` routes to 7 domain modules: matters.py, timebilling.py, trust.py, documents.py, calendar.py, conflicts.py, compliance.py
-
-**Cross-skill integration:** `generate-invoice` creates a real `sales_invoice` via erpclaw-selling (cross_skill.create_invoice). `record-payment` creates a `payment_entry` via erpclaw-payments (cross_skill.create_payment). `send-invoice` submits the linked sales invoice. All cross-skill calls are gracefully degraded -- if selling/payments modules are not installed, the legal invoice still works standalone.
-
-**Data conventions:** Money = TEXT (Python Decimal), IDs = TEXT (UUID4), Dates = TEXT (ISO 8601), Booleans = INTEGER (0/1), Time = 6-minute increments (0.1 hours)
-
-**Shared library:** erpclaw_lib (get_connection, ok/err, row_to_dict, get_next_name, audit, to_decimal, round_currency, check_required_tables, cross_skill)
+**Tables (16):** All use `legalclaw_` prefix. **Script:** `scripts/db_query.py` routes to 9 modules. **Cross-skill:** Invoices create sales_invoice via erpclaw-selling. Payments create payment_entry via erpclaw-payments. **Data:** Money=TEXT(Decimal), IDs=TEXT(UUID4), Time=0.1hr increments.

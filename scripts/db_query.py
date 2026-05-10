@@ -232,7 +232,6 @@ def main():
     # == SOL Calculator ==
     parser.add_argument("--claim-type")
     parser.add_argument("--incident-date")
-    parser.add_argument("--reminder-days")
 
     args, unknown = parser.parse_known_args()
     check_unknown_args(parser, unknown)

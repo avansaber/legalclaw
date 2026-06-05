@@ -1,6 +1,6 @@
 # LegalClaw
 
-Legal practice management for [ERPClaw](https://github.com/avansaber/erpclaw). Matter management, time and billing, IOLTA trust accounting, document management, court calendar, conflict checking, and bar/CLE compliance. 69 actions across 7 domains.
+Legal practice management for [ERPClaw](https://github.com/avansaber/erpclaw). Matter management, time and billing, IOLTA trust accounting, document management, court calendar, conflict checking, and bar/CLE compliance. <!-- SYNC:value:module.legalclaw.actions -->100<!-- /SYNC --> actions across 7 domains.
 
 ## Features
 

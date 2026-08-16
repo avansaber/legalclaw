@@ -11,14 +11,17 @@ from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 
 try:
-    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+    import importlib.util
+    if importlib.util.find_spec("erpclaw_lib") is None:
+        sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
     from erpclaw_lib.db import get_connection
     from erpclaw_lib.decimal_utils import to_decimal, round_currency
     from erpclaw_lib.naming import get_next_name, ENTITY_PREFIXES
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.cross_skill import (
-        create_invoice, submit_invoice, create_payment, CrossSkillError,
+        create_invoice, submit_invoice, create_payment, call_skill_action,
+        CrossSkillError,
     )
     from erpclaw_lib.query import (
         Q, P, Table, Field, fn, Order, LiteralValue,
@@ -730,6 +733,20 @@ def record_payment(conn, args):
 # 12. write-off-invoice
 # ---------------------------------------------------------------------------
 def write_off_invoice(conn, args):
+    """Write off a legal invoice, with the accounting half actually posted.
+
+    Wave G F17c. This action used to flip ``status`` to 'written_off' and zero
+    the vertical's ``balance`` while posting NO GL and touching no receivable —
+    the "looks done" class the wave's defect register names. It now delegates the
+    accounting to the foundation's ``write-off-invoice`` primitive (F17a), which
+    posts the balanced pair under the sales invoice's own voucher and drops its
+    outstanding, and stamps this row from that result.
+
+    SHIPPED-BEHAVIOR DELTA: when ``sales_invoice_id`` is NULL there is nothing in
+    the books to write off, so the action REFUSES instead of silently clearing.
+    Unlinked legal invoices can no longer be written off. Silently zeroing a
+    balance with no ledger behind it is the defect, not the feature.
+    """
     inv_id = getattr(args, "invoice_id", None)
     if not inv_id:
         err("--invoice-id is required")
@@ -740,6 +757,57 @@ def write_off_invoice(conn, args):
     if row["status"] in ("paid", "written_off"):
         err(f"Invoice {inv_id} is already {row['status']}")
 
+    si_id = row["sales_invoice_id"]
+    if not si_id:
+        err(f"Legal invoice {inv_id} is not linked to an accounting invoice; "
+            "there is nothing in the books to write off, and clearing its "
+            "balance here would move no receivable and post no GL.",
+            suggestion="Link it to a sales invoice, or write off the core "
+                       "invoice directly with write-off-invoice.")
+
+    balance = to_decimal(row["balance"])
+    if balance <= 0:
+        err(f"Legal invoice {inv_id} has nothing outstanding to write off "
+            f"(balance {row['balance']})")
+
+    account_id = getattr(args, "write_off_account_id", None)
+    if not account_id:
+        err("--write-off-account-id is required (the bad-debt expense account "
+            "the write-off is charged to)")
+    reason = (getattr(args, "reason", None) or "").strip()
+    if not reason:
+        err("--reason is required (a write-off is an accounting decision; the "
+            "audit trail records why)")
+
+    # The accounting moves FIRST and through the owning module. legalclaw does
+    # not write sales_invoice, gl_entry or payment_ledger_entry, and a failure
+    # here must leave this row untouched rather than half-applied — that is the
+    # whole reason the refusal above exists.
+    try:
+        result = call_skill_action(
+            "erpclaw", "write-off-invoice",
+            {
+                "--voucher-type": "sales_invoice",
+                "--voucher-id": si_id,
+                "--write-off-amount": str(round_currency(balance)),
+                "--write-off-account-id": account_id,
+                "--reason": reason,
+                # NOT the blanket auto-confirm wrapper ADR-0018 dec. 3 forbids.
+                # `legal-write-off-invoice` is itself in the gated transaction
+                # class, so the confirmation the caller already gave covers THIS
+                # operation; the hop is the same write-off continuing across a
+                # module boundary, not a second, independent gated action. The
+                # flag is passed on exactly this one call, never appended
+                # generically to cross-skill traffic.
+                "--user-confirmed": None,
+            },
+            db_path=_get_db_path(conn),
+        )
+    except CrossSkillError as e:
+        err(f"The accounting write-off failed, so nothing was written: {e}",
+            suggestion="Fix the underlying sales invoice, then retry. This "
+                       "legal invoice is unchanged.")
+
     now = _now_iso()
     sql, params = dynamic_update("legalclaw_invoice",
         {"status": "written_off", "balance": "0", "updated_at": now},
@@ -748,7 +816,13 @@ def write_off_invoice(conn, args):
     audit(conn, "legalclaw_invoice", inv_id, "legal-write-off-invoice",
           getattr(args, "company_id", None))
     conn.commit()
-    ok({"id": inv_id, "invoice_status": "written_off", "written_off_amount": row["balance"]})
+    ok({"id": inv_id, "invoice_status": "written_off",
+        "written_off_amount": row["balance"],
+        "sales_invoice_id": si_id,
+        "sales_invoice_status": result.get("invoice_status"),
+        "sales_invoice_outstanding": result.get("outstanding_amount"),
+        "gl_entries_created": result.get("gl_entries_created"),
+        "reason": reason})
 
 
 # ---------------------------------------------------------------------------

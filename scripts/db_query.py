@@ -14,7 +14,9 @@ import sys
 
 # Add shared lib to path
 try:
-    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+    import importlib.util
+    if importlib.util.find_spec("erpclaw_lib") is None:
+        sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
     from erpclaw_lib.db import get_connection, ensure_db_exists, DEFAULT_DB_PATH
     from erpclaw_lib.validation import check_input_lengths
     from erpclaw_lib.response import ok, err
@@ -122,6 +124,12 @@ def main():
     parser.add_argument("--invoice-format")
     parser.add_argument("--invoice-status")
     parser.add_argument("--payment-amount")
+    # legal-write-off-invoice (F17c) delegates the accounting to the foundation's
+    # write-off-invoice, which requires both of these; there is no default for
+    # either, because guessing the expense account or the reason is exactly what
+    # made the old silent-clear path wrong.
+    parser.add_argument("--write-off-account-id")
+    parser.add_argument("--reason")
 
     # == TRUST domain ==
     parser.add_argument("--trust-account-id")

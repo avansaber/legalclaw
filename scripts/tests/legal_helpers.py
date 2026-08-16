@@ -34,9 +34,18 @@ ERPCLAW_DIR = os.path.join(SRC_DIR, "erpclaw", "scripts", "erpclaw-setup")
 INIT_SCHEMA_PATH = os.path.join(ERPCLAW_DIR, "init_schema.py")
 
 # Make erpclaw_lib importable
-ERPCLAW_LIB = os.path.expanduser("~/.openclaw/erpclaw/lib")
+# M54: bind erpclaw_lib to the tree under test, never the deployed
+# ~/.openclaw/erpclaw/lib symlink — the last install to run wins that symlink,
+# so with several worktrees in flight it resolves to a tree nobody is testing
+# (and DANGLES once that worktree is removed). The deployed install stays as
+# the fallback for a published module repo, which ships no source/erpclaw/.
+_IN_TREE_LIB = os.path.join(SRC_DIR, "erpclaw", "scripts", "erpclaw-setup", "lib")
+ERPCLAW_LIB = (_IN_TREE_LIB if os.path.isdir(os.path.join(_IN_TREE_LIB, "erpclaw_lib"))
+               else os.path.join(os.path.expanduser(
+                   os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
 if ERPCLAW_LIB not in sys.path:
-    sys.path.insert(0, ERPCLAW_LIB)
+    if importlib.util.find_spec("erpclaw_lib") is None:
+        sys.path.insert(0, ERPCLAW_LIB)
 
 from erpclaw_lib.db import setup_pragmas
 
@@ -524,6 +533,10 @@ def build_env(conn) -> dict:
                                    "equity", "2100")
     interest_income = seed_account(conn, cid, "Interest Income", "income",
                                    "revenue", "4100")
+    # Billing-side accounts: the receivable a legal invoice's core sales invoice
+    # controls, and the expense a write-off is charged to (F17c).
+    receivable = seed_account(conn, cid, "Debtors", "asset", "receivable", "1200")
+    bad_debt = seed_account(conn, cid, "Bad Debt Expense", "expense", None, "5200")
 
     # Customer (core + ext)
     core_cust = seed_customer(conn, cid, "Jane Client", "jane@test.com", "555-0200")
@@ -545,6 +558,8 @@ def build_env(conn) -> dict:
         "trust_bank_acct": trust_bank,
         "trust_liability_acct": trust_liability,
         "interest_income_acct": interest_income,
+        "receivable_acct": receivable,
+        "bad_debt_acct": bad_debt,
         "core_customer_id": core_cust,
         "client_ext_id": client_ext,
         "matter_id": matter,

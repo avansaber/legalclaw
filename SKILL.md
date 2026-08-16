@@ -81,7 +81,7 @@ python3 {baseDir}/scripts/db_query.py --action status
 | `legal-list-invoices` | List invoices |
 | `legal-send-invoice` | Send/submit invoice |
 | `legal-record-payment` | Record invoice payment |
-| `legal-write-off-invoice` | Write off invoice |
+| `legal-write-off-invoice` | Write off invoice. Needs `--write-off-account-id` (bad-debt expense) + `--reason`; delegates the accounting to the core `write-off-invoice`, which posts the GL and drops the sales invoice's outstanding. Refuses if the legal invoice has no linked sales invoice (nothing in the books to write off) |
 | `legal-billable-utilization-report` | Billable utilization |
 | `legal-ar-aging-report` | AR aging report |
 

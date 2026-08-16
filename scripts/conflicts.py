@@ -9,13 +9,15 @@ import uuid
 from datetime import datetime, timezone
 
 try:
-    sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
+    import importlib.util
+    if importlib.util.find_spec("erpclaw_lib") is None:
+        sys.path.insert(0, os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "lib"))
     from erpclaw_lib.db import get_connection
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
     from erpclaw_lib.query import (
         Q, P, Table, Field, fn, Order, LiteralValue,
-        insert_row, update_row, dynamic_update,
+        insert_row, update_row, dynamic_update, string_agg,
     )
 except ImportError:
     pass
@@ -75,7 +77,7 @@ def check_conflicts(conn, args):
         .left_join(_matter).on(_ext.id == _matter.client_id)
         .select(
             _ext.id, _cust.name, _ext.client_type,
-            LiteralValue("GROUP_CONCAT(\"legalclaw_matter\".\"title\", '; ')").as_("matter_titles"),
+            string_agg('"legalclaw_matter"."title"', "'; '").as_("matter_titles"),
         )
         .where(_cust.name.like(P()))
         .where(_ext.company_id == P())

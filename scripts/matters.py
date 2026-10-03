@@ -36,6 +36,8 @@ except ImportError:
 
 _now_iso = lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+SKILL = "legalclaw"
+
 # ---------------------------------------------------------------------------
 # Validation constants
 # ---------------------------------------------------------------------------
@@ -142,7 +144,7 @@ def add_client(conn, args):
         ext_id, ns, customer_id, client_type,
         billing_rate, 1, args.company_id, now, now,
     ))
-    audit(conn, "legalclaw_client_ext", ext_id, "legal-add-client", args.company_id)
+    audit(conn, SKILL, "legal-add-client", "legalclaw_client_ext", ext_id)
     conn.commit()
     ok({"id": ext_id, "naming_series": ns, "customer_id": customer_id,
         "name": name, "client_type": client_type})
@@ -213,8 +215,7 @@ def update_client(conn, args):
         sql, params = dynamic_update("legalclaw_client_ext", ext_data, where={"id": client_id})
         conn.execute(sql, params)
 
-    audit(conn, "legalclaw_client_ext", client_id, "legal-update-client",
-          getattr(args, "company_id", None))
+    audit(conn, SKILL, "legal-update-client", "legalclaw_client_ext", client_id)
     conn.commit()
     ok({"id": client_id, "customer_id": customer_id, "updated_fields": changed})
 
@@ -316,7 +317,7 @@ def add_matter(conn, args):
         getattr(args, "notes", None),
         args.company_id, now, now,
     ))
-    audit(conn, "legalclaw_matter", matter_id, "legal-add-matter", args.company_id)
+    audit(conn, SKILL, "legal-add-matter", "legalclaw_matter", matter_id)
     conn.commit()
     ok({
         "id": matter_id, "naming_series": ns, "matter_number": ns,
@@ -363,8 +364,7 @@ def update_matter(conn, args):
     data["updated_at"] = _now_iso()
     sql, params = dynamic_update("legalclaw_matter", data, where={"id": matter_id})
     conn.execute(sql, params)
-    audit(conn, "legalclaw_matter", matter_id, "legal-update-matter",
-          getattr(args, "company_id", None))
+    audit(conn, SKILL, "legal-update-matter", "legalclaw_matter", matter_id)
     conn.commit()
     ok({"id": matter_id, "updated_fields": changed})
 
@@ -439,7 +439,7 @@ def add_matter_party(conn, args):
         getattr(args, "notes", None),
         args.company_id, _now_iso(),
     ))
-    audit(conn, "legalclaw_matter_party", party_id, "legal-add-matter-party", args.company_id)
+    audit(conn, SKILL, "legal-add-matter-party", "legalclaw_matter_party", party_id)
     conn.commit()
     ok({"id": party_id, "matter_id": matter_id, "party_name": party_name, "party_type": party_type})
 
@@ -487,8 +487,7 @@ def close_matter(conn, args):
         {"status": "closed", "closed_date": closed_date, "updated_at": now},
         where={"id": matter_id})
     conn.execute(sql, params)
-    audit(conn, "legalclaw_matter", matter_id, "legal-close-matter",
-          getattr(args, "company_id", None))
+    audit(conn, SKILL, "legal-close-matter", "legalclaw_matter", matter_id)
     conn.commit()
     ok({"id": matter_id, "matter_status": "closed", "closed_date": closed_date})
 
@@ -516,8 +515,7 @@ def reopen_matter(conn, args):
         .where(t.id == P())
     )
     conn.execute(upd.get_sql(), (now, matter_id))
-    audit(conn, "legalclaw_matter", matter_id, "legal-reopen-matter",
-          getattr(args, "company_id", None))
+    audit(conn, SKILL, "legal-reopen-matter", "legalclaw_matter", matter_id)
     conn.commit()
     ok({"id": matter_id, "matter_status": "active"})
 

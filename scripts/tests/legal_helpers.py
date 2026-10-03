@@ -546,9 +546,8 @@ def build_env(conn) -> dict:
     matter = seed_matter(conn, client_ext, cid, title="Smith v. Jones",
                          practice_area="litigation", billing_rate="300.00")
 
-    # Trust account (without GL linkage for L1 tests -- trust voucher_types
-    # like "Trust Deposit" are not in foundation gl_entry CHECK constraint;
-    # GL-linked trust testing requires registering custom voucher types)
+    # Trust account (without GL linkage on purpose -- the four trust voucher types
+    # are seeded by init_schema and migration 049, so GL-linked trust tests need no hand registration)
     trust_acct = seed_trust_account(conn, cid)
 
     return {

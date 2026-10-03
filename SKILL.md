@@ -171,7 +171,7 @@ python3 {baseDir}/scripts/db_query.py --action status
 |--------|-------------|
 | `legal-generate-replenishment-request` | Generate retainer replenishment |
 | `legal-record-settlement` | Record settlement |
-| `legal-disburse-settlement` | Disburse settlement funds |
+| `legal-disburse-settlement` | Pay a pending settlement out of a trust account (--trust-account-id, --operating-account-id, --fee-income-account-id, --costs-recovery-account-id, --cost-center-id); the fee is booked as revenue and the recovered costs land in the firm's operating account |
 | `legal-settlement-report` | Settlement report |
 | `legal-add-communication` | Log communication |
 | `legal-list-communications` | List communications |

@@ -24,6 +24,8 @@ except ImportError:
 
 _now_iso = lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+SKILL = "legalclaw"
+
 VALID_EVENT_TYPES = (
     "hearing", "deposition", "filing_deadline", "statute_of_limitations",
     "trial", "mediation", "meeting", "other",
@@ -101,7 +103,7 @@ def add_calendar_event(conn, args):
         reminder_days, is_critical, "scheduled",
         args.company_id, now, now,
     ))
-    audit(conn, "legalclaw_calendar_event", event_id, "legal-add-calendar-event", args.company_id)
+    audit(conn, SKILL, "legal-add-calendar-event", "legalclaw_calendar_event", event_id)
     conn.commit()
     ok({
         "id": event_id, "title": event_title, "event_type": event_type,
@@ -158,8 +160,7 @@ def update_calendar_event(conn, args):
     data["updated_at"] = _now_iso()
     sql, params = dynamic_update("legalclaw_calendar_event", data, where={"id": event_id})
     conn.execute(sql, params)
-    audit(conn, "legalclaw_calendar_event", event_id, "legal-update-calendar-event",
-          getattr(args, "company_id", None))
+    audit(conn, SKILL, "legal-update-calendar-event", "legalclaw_calendar_event", event_id)
     conn.commit()
     ok({"id": event_id, "updated_fields": changed})
 
@@ -214,8 +215,7 @@ def complete_event(conn, args):
         {"status": "completed", "updated_at": now},
         where={"id": event_id})
     conn.execute(sql, params)
-    audit(conn, "legalclaw_calendar_event", event_id, "legal-complete-event",
-          getattr(args, "company_id", None))
+    audit(conn, SKILL, "legal-complete-event", "legalclaw_calendar_event", event_id)
     conn.commit()
     ok({"id": event_id, "event_status": "completed"})
 
@@ -260,7 +260,7 @@ def add_deadline(conn, args):
         getattr(args, "notes", None),
         args.company_id, now, now,
     ))
-    audit(conn, "legalclaw_deadline", dl_id, "legal-add-deadline", args.company_id)
+    audit(conn, SKILL, "legal-add-deadline", "legalclaw_deadline", dl_id)
     conn.commit()
     ok({
         "id": dl_id, "matter_id": matter_id, "title": deadline_title,
@@ -305,8 +305,7 @@ def update_deadline(conn, args):
     data["updated_at"] = _now_iso()
     sql, params = dynamic_update("legalclaw_deadline", data, where={"id": dl_id})
     conn.execute(sql, params)
-    audit(conn, "legalclaw_deadline", dl_id, "legal-update-deadline",
-          getattr(args, "company_id", None))
+    audit(conn, SKILL, "legal-update-deadline", "legalclaw_deadline", dl_id)
     conn.commit()
     ok({"id": dl_id, "updated_fields": changed})
 
@@ -362,8 +361,7 @@ def complete_deadline(conn, args):
         {"is_completed": 1, "completed_date": completed_date, "updated_at": now},
         where={"id": dl_id})
     conn.execute(sql, params)
-    audit(conn, "legalclaw_deadline", dl_id, "legal-complete-deadline",
-          getattr(args, "company_id", None))
+    audit(conn, SKILL, "legal-complete-deadline", "legalclaw_deadline", dl_id)
     conn.commit()
     ok({"id": dl_id, "deadline_status": "completed", "completed_date": completed_date})
 

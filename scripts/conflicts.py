@@ -24,6 +24,8 @@ except ImportError:
 
 _now_iso = lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+SKILL = "legalclaw"
+
 # ── Table aliases ──
 _company = Table("company")
 _party = Table("legalclaw_matter_party")
@@ -107,7 +109,7 @@ def check_conflicts(conn, args):
         json.dumps(match_details),
         result, matter_id, args.company_id, now,
     ))
-    audit(conn, "legalclaw_conflict_check", check_id, "legal-check-conflicts", args.company_id)
+    audit(conn, SKILL, "legal-check-conflicts", "legalclaw_conflict_check", check_id)
     conn.commit()
     ok({
         "id": check_id, "search_name": search_name,
@@ -153,7 +155,7 @@ def add_conflict_waiver(conn, args):
         where={"id": conflict_check_id})
     conn.execute(upd_sql, upd_params)
 
-    audit(conn, "legalclaw_conflict_waiver", waiver_id, "legal-add-conflict-waiver", args.company_id)
+    audit(conn, SKILL, "legal-add-conflict-waiver", "legalclaw_conflict_waiver", waiver_id)
     conn.commit()
     ok({"id": waiver_id, "conflict_check_id": conflict_check_id,
         "waived_by": waived_by, "result": "waived"})

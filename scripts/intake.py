@@ -24,6 +24,7 @@ try:
     from erpclaw_lib.decimal_utils import to_decimal, round_currency
     from erpclaw_lib.response import ok, err, row_to_dict
     from erpclaw_lib.audit import audit
+    from erpclaw_lib.gl_posting import insert_gl_entries
     from erpclaw_lib.query import (
         Q, P, Table, Field, fn, Order, LiteralValue,
         insert_row, update_row, dynamic_update,
@@ -31,11 +32,15 @@ try:
 except ImportError:
     pass
 
+import trust
+
 _now_iso = lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 SKILL = "legalclaw"
 
 _company = Table("company")
+_account = Table("account")
+_cc = Table("cost_center")
 _matter = Table("legalclaw_matter")
 _ext = Table("legalclaw_client_ext")
 _cust = Table("customer")
@@ -131,7 +136,7 @@ def add_intake(conn, args):
         "new",
         args.company_id, n, n,
     ))
-    audit(conn, "legalclaw_intake", i_id, "legal-add-intake", args.company_id)
+    audit(conn, SKILL, "legal-add-intake", "legalclaw_intake", i_id)
     conn.commit()
     ok({"intake_id": i_id, "contact_name": contact_name, "urgency": urgency, "intake_status": "new"})
 
@@ -180,8 +185,7 @@ def update_intake(conn, args):
     data["updated_at"] = _now_iso()
     sql, params = dynamic_update("legalclaw_intake", data, where={"id": i_id})
     conn.execute(sql, params)
-    audit(conn, "legalclaw_intake", i_id, "legal-update-intake",
-          getattr(args, "company_id", None))
+    audit(conn, SKILL, "legal-update-intake", "legalclaw_intake", i_id)
     conn.commit()
     ok({"intake_id": i_id, "updated_fields": changed})
 
@@ -267,7 +271,7 @@ def convert_intake_to_matter(conn, args):
                                where={"id": i_id})
     conn.execute(sql2, p2)
 
-    audit(conn, "legalclaw_intake", i_id, "legal-convert-intake-to-matter", args.company_id)
+    audit(conn, SKILL, "legal-convert-intake-to-matter", "legalclaw_intake", i_id)
     conn.commit()
     ok({"intake_id": i_id, "matter_id": m_id, "title": title, "intake_status": "converted"})
 
@@ -328,8 +332,7 @@ def set_retainer_threshold(conn, args):
     # We use a dynamic_update to set a metadata field
     # Since the schema doesn't have a threshold column, we store it in a pragmatic way
     # by recording it in the audit trail and returning it
-    audit(conn, "legalclaw_trust_account", ta_id, "legal-set-retainer-threshold",
-          getattr(args, "company_id", None),
+    audit(conn, SKILL, "legal-set-retainer-threshold", "legalclaw_trust_account", ta_id,
           new_values={"minimum_balance": threshold})
     conn.commit()
     ok({
@@ -429,7 +432,7 @@ def add_task_template(conn, args):
         0,
         args.company_id, n,
     ))
-    audit(conn, "legalclaw_task_template", t_id, "legal-add-task-template", args.company_id)
+    audit(conn, SKILL, "legal-add-task-template", "legalclaw_task_template", t_id)
     conn.commit()
     ok({"template_id": t_id, "name": name})
 
@@ -475,8 +478,7 @@ def add_task_template_item(conn, args):
                                where={"id": template_id})
     conn.execute(sql2, p2)
 
-    audit(conn, "legalclaw_task_template_item", ti_id, "legal-add-task-template-item",
-          getattr(args, "company_id", None))
+    audit(conn, SKILL, "legal-add-task-template-item", "legalclaw_task_template_item", ti_id)
     conn.commit()
     ok({"template_item_id": ti_id, "template_id": template_id, "task_name": task_name})
 
@@ -583,7 +585,7 @@ def apply_task_template(conn, args):
             "due_date": due_date,
         })
 
-    audit(conn, "legalclaw_matter", matter_id, "legal-apply-task-template", args.company_id)
+    audit(conn, SKILL, "legal-apply-task-template", "legalclaw_matter", matter_id)
     conn.commit()
     ok({
         "matter_id": matter_id,
@@ -598,11 +600,14 @@ def apply_task_template(conn, args):
 # L5: CONTINGENCY FEE / SETTLEMENT
 # ===========================================================================
 
-def record_settlement(conn, args):
-    matter_id = getattr(args, "matter_id", None)
-    _validate_matter(conn, matter_id)
-    _validate_company(conn, args.company_id)
+def _settlement_split(args):
+    """Validate the settlement inputs and work out the split.
 
+    Shared by legal-record-settlement and legal-calculate-contingency-fee so the
+    two cannot drift. Refuses (through err) before the caller writes anything.
+    Returns (gross, pct, attorney_fee, costs, net_to_client); the fee and the net
+    are rounded ROUND_HALF_UP to 0.01.
+    """
     gross_amount = getattr(args, "gross_amount", None)
     if not gross_amount:
         err("--gross-amount is required")
@@ -612,9 +617,27 @@ def record_settlement(conn, args):
 
     gross = _d(gross_amount)
     pct = _d(contingency_pct)
-    attorney_fee = (gross * pct / Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     costs = _d(getattr(args, "costs_advanced", None))
-    net_to_client = gross - attorney_fee - costs
+    if gross <= 0:
+        err("--gross-amount must be greater than zero")
+    if pct < 0 or pct > 100:
+        err("--contingency-pct must be between 0 and 100")
+    if costs < 0:
+        err("--costs-advanced must not be negative")
+
+    attorney_fee = (gross * pct / Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    net_to_client = (gross - attorney_fee - costs).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if net_to_client < 0:
+        err(f"Costs advanced ({costs}) exceed the amount left after the attorney fee ({gross - attorney_fee}); net to client would be {net_to_client}")
+    return gross, pct, attorney_fee, costs, net_to_client
+
+
+def record_settlement(conn, args):
+    matter_id = getattr(args, "matter_id", None)
+    _validate_matter(conn, matter_id)
+    _validate_company(conn, args.company_id)
+
+    gross, pct, attorney_fee, costs, net_to_client = _settlement_split(args)
 
     s_id = str(uuid.uuid4())
     n = _now_iso()
@@ -630,13 +653,13 @@ def record_settlement(conn, args):
         getattr(args, "settlement_date", None) or date.today().isoformat(),
         str(gross), str(pct), str(attorney_fee),
         str(costs),
-        str(net_to_client.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+        str(net_to_client),
         getattr(args, "payment_method", None),
         getattr(args, "notes", None),
         "pending",
         args.company_id, n,
     ))
-    audit(conn, "legalclaw_settlement", s_id, "legal-record-settlement", args.company_id)
+    audit(conn, SKILL, "legal-record-settlement", "legalclaw_settlement", s_id)
     conn.commit()
     ok({
         "settlement_id": s_id, "matter_id": matter_id,
@@ -644,33 +667,129 @@ def record_settlement(conn, args):
         "contingency_pct": str(pct),
         "attorney_fee": str(attorney_fee),
         "costs_advanced": str(costs),
-        "net_to_client": str(net_to_client.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+        "net_to_client": str(net_to_client),
         "settlement_status": "pending",
     })
 
 
 def calculate_contingency_fee(conn, args):
     """Calculate contingency fee for a given amount and percentage."""
-    gross_amount = getattr(args, "gross_amount", None)
-    if not gross_amount:
-        err("--gross-amount is required")
-    contingency_pct = getattr(args, "contingency_pct", None)
-    if not contingency_pct:
-        err("--contingency-pct is required")
-
-    gross = _d(gross_amount)
-    pct = _d(contingency_pct)
-    fee = (gross * pct / Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    costs = _d(getattr(args, "costs_advanced", None))
-    net = gross - fee - costs
+    gross, pct, fee, costs, net = _settlement_split(args)
 
     ok({
         "gross_amount": str(gross),
         "contingency_pct": str(pct),
         "attorney_fee": str(fee),
         "costs_advanced": str(costs),
-        "net_to_client": str(net.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+        "net_to_client": str(net),
     })
+
+
+
+def _trust_ledger_account_ids(conn):
+    """Every gl_account_id / trust_liability_account_id on any trust account."""
+    rows = conn.execute(
+        Q.from_(_ta).select(_ta.gl_account_id, _ta.trust_liability_account_id).get_sql(),
+    ).fetchall()
+    ids = set()
+    for r in rows:
+        if r["gl_account_id"]:
+            ids.add(r["gl_account_id"])
+        if r["trust_liability_account_id"]:
+            ids.add(r["trust_liability_account_id"])
+    return ids
+
+
+def _get_gl_account(conn, account_id):
+    row = conn.execute(
+        Q.from_(_account).select(_account.star).where(_account.id == P()).get_sql(),
+        (account_id,),
+    ).fetchone()
+    return row
+
+
+def _validate_operating_account(conn, operating_account_id, company_id):
+    if not operating_account_id:
+        err("--operating-account-id is required to post the fee and recovered costs (the trust account is GL-linked)")
+    acct = _get_gl_account(conn, operating_account_id)
+    if not acct:
+        err(f"--operating-account-id account {operating_account_id} not found in chart of accounts")
+    if acct["company_id"] != company_id:
+        err(f"--operating-account-id account {operating_account_id} belongs to a different company")
+    if acct["is_group"]:
+        err(f"--operating-account-id account '{acct['name']}' is a group account; a ledger account is required")
+    if acct["disabled"]:
+        err(f"--operating-account-id account '{acct['name']}' is disabled")
+    if (acct["account_type"] or "") not in ("bank", "cash"):
+        err(f"--operating-account-id account '{acct['name']}' must be a bank or cash account (account_type={acct['account_type']})")
+    if operating_account_id in _trust_ledger_account_ids(conn):
+        err(f"--operating-account-id account '{acct['name']}' is a trust ledger account; the firm's operating account must be separate")
+    return acct
+
+
+def _validate_fee_income_account(conn, fee_income_account_id, company_id):
+    if not fee_income_account_id:
+        err("--fee-income-account-id is required to post the contingency fee (no company default income account is set)")
+    acct = _get_gl_account(conn, fee_income_account_id)
+    if not acct:
+        err(f"--fee-income-account-id account {fee_income_account_id} not found in chart of accounts")
+    if acct["company_id"] != company_id:
+        err(f"--fee-income-account-id account {fee_income_account_id} belongs to a different company")
+    if acct["is_group"]:
+        err(f"--fee-income-account-id account '{acct['name']}' is a group account; a ledger account is required")
+    if acct["disabled"]:
+        err(f"--fee-income-account-id account '{acct['name']}' is disabled")
+    if acct["root_type"] != "income":
+        err(f"--fee-income-account-id account '{acct['name']}' must have root type income (root_type={acct['root_type']})")
+    return acct
+
+
+def _validate_costs_recovery_account(conn, costs_recovery_account_id, operating_account_id, costs, company_id):
+    if not costs_recovery_account_id:
+        err(f"--costs-recovery-account-id is required when costs advanced ({costs}) is above zero")
+    acct = _get_gl_account(conn, costs_recovery_account_id)
+    if not acct:
+        err(f"--costs-recovery-account-id account {costs_recovery_account_id} not found in chart of accounts")
+    if acct["company_id"] != company_id:
+        err(f"--costs-recovery-account-id account {costs_recovery_account_id} belongs to a different company")
+    if acct["is_group"]:
+        err(f"--costs-recovery-account-id account '{acct['name']}' is a group account; a ledger account is required")
+    if acct["disabled"]:
+        err(f"--costs-recovery-account-id account '{acct['name']}' is disabled")
+    if acct["root_type"] not in ("asset", "expense"):
+        err(f"--costs-recovery-account-id account '{acct['name']}' must have root type asset or expense (root_type={acct['root_type']})")
+    if (acct["account_type"] or "") in ("bank", "cash"):
+        err(f"--costs-recovery-account-id account '{acct['name']}' must not be a bank or cash account")
+    if costs_recovery_account_id == operating_account_id:
+        err(f"--costs-recovery-account-id account '{acct['name']}' must differ from --operating-account-id")
+    if costs_recovery_account_id in _trust_ledger_account_ids(conn):
+        err(f"--costs-recovery-account-id account '{acct['name']}' is a trust ledger account; the costs recovery account must be separate")
+    return acct
+
+
+def _validate_cost_center(conn, cost_center_id, company_id, flag="--cost-center-id"):
+    cc = conn.execute(
+        Q.from_(_cc).select(_cc.star).where(_cc.id == P()).get_sql(),
+        (cost_center_id,),
+    ).fetchone()
+    if not cc:
+        err(f"{flag} cost center {cost_center_id} not found")
+    if cc["is_group"]:
+        err(f"{flag} cost center '{cc['name']}' is a group; a ledger cost center is required")
+    if cc["company_id"] != company_id:
+        err(f"{flag} cost center '{cc['name']}' belongs to a different company")
+    return cc
+
+
+def _append_trust_txn_gl_ids(conn, txn_id, ids):
+    sql_gl, params_gl = dynamic_update("legalclaw_trust_transaction",
+        {"gl_entry_ids": ",".join(ids)},
+        where={"id": txn_id})
+    conn.execute(sql_gl, params_gl)
+
+
+def _money2(amount):
+    return str(to_decimal(amount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
 def disburse_settlement(conn, args):
@@ -687,14 +806,179 @@ def disburse_settlement(conn, args):
     if row["status"] != "pending":
         err(f"Settlement is already {row['status']}")
 
-    sql, params = dynamic_update("legalclaw_settlement",
-                                  {"status": "disbursed"},
-                                  where={"id": s_id})
-    conn.execute(sql, params)
-    audit(conn, "legalclaw_settlement", s_id, "legal-disburse-settlement",
-          getattr(args, "company_id", None))
-    conn.commit()
-    ok({"settlement_id": s_id, "settlement_status": "disbursed"})
+    ta_id = getattr(args, "trust_account_id", None)
+    ta_row = trust._validate_trust_account(conn, ta_id)
+    if ta_row["company_id"] != row["company_id"]:
+        err(f"Trust account {ta_id} belongs to a different company than settlement {s_id}")
+
+    net = to_decimal(row["net_to_client"])
+    if net < 0:
+        err(f"Settlement {s_id} has a negative net to client ({net}); it cannot be disbursed")
+
+    fee = to_decimal(row["attorney_fee"])
+    costs = to_decimal(row["costs_advanced"])
+    total = net + fee + costs
+
+    current_balance = to_decimal(ta_row["current_balance"])
+    if total > current_balance:
+        err(f"Insufficient trust balance: {current_balance} available, {total} requested")
+
+    matter_id = row["matter_id"]
+    mb_q = Q.from_(_matter).select(_matter.trust_balance).where(_matter.id == P())
+    matter_row = conn.execute(mb_q.get_sql(), (matter_id,)).fetchone()
+    matter_balance_text = matter_row["trust_balance"] if matter_row["trust_balance"] is not None else "0"
+    matter_balance = to_decimal(matter_balance_text)
+    if total > matter_balance:
+        err(f"Insufficient trust balance for matter {matter_id}: {matter_balance_text} available, {total} requested")
+
+    m_q = Q.from_(_matter).select(_matter.client_id).where(_matter.id == P())
+    matter = conn.execute(m_q.get_sql(), (matter_id,)).fetchone()
+    client_name = None
+    customer_id = None
+    if matter and matter["client_id"]:
+        e_q = Q.from_(_ext).select(_ext.customer_id).where(_ext.id == P())
+        ext = conn.execute(e_q.get_sql(), (matter["client_id"],)).fetchone()
+        if ext and ext["customer_id"]:
+            customer_id = ext["customer_id"]
+            c_q = Q.from_(_cust).select(_cust.name).where(_cust.id == P())
+            cust = conn.execute(c_q.get_sql(), (ext["customer_id"],)).fetchone()
+            if cust:
+                client_name = cust["name"]
+    co_q = Q.from_(_company).select(_company.name).where(_company.id == P())
+    co = conn.execute(co_q.get_sql(), (row["company_id"],)).fetchone()
+    firm_name = co["name"] if co else None
+    if not client_name or not firm_name:
+        err(f"Cannot resolve the payee for settlement {s_id}")
+
+    transaction_date = getattr(args, "transaction_date", None) or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    company_id = row["company_id"]
+
+    operating_account_id = getattr(args, "operating_account_id", None)
+    fee_income_account_id = getattr(args, "fee_income_account_id", None)
+    costs_recovery_account_id = getattr(args, "costs_recovery_account_id", None)
+    cost_center_id = getattr(args, "cost_center_id", None)
+
+    gl_linked = bool(ta_row["gl_account_id"] and ta_row["trust_liability_account_id"])
+    operating_acct = None
+    fee_acct = None
+    recovery_acct = None
+    if not gl_linked:
+        if operating_account_id or fee_income_account_id or costs_recovery_account_id or cost_center_id:
+            err(f"Trust account {ta_id} is not GL-linked; the fee and costs cannot be posted")
+    else:
+        co_defaults = conn.execute(
+            Q.from_(_company).select(_company.default_income_account_id, _company.default_cost_center_id).where(_company.id == P()).get_sql(),
+            (company_id,),
+        ).fetchone()
+        if not fee_income_account_id and co_defaults:
+            fee_income_account_id = co_defaults["default_income_account_id"]
+        if not cost_center_id and co_defaults:
+            cost_center_id = co_defaults["default_cost_center_id"]
+        if fee > 0 or costs > 0:
+            operating_acct = _validate_operating_account(conn, operating_account_id, company_id)
+        if fee > 0:
+            fee_acct = _validate_fee_income_account(conn, fee_income_account_id, company_id)
+            if not cost_center_id:
+                err("--cost-center-id is required to post the contingency fee (no company default cost center is set)")
+            _validate_cost_center(conn, cost_center_id, company_id)
+        if costs > 0:
+            recovery_acct = _validate_costs_recovery_account(
+                conn, costs_recovery_account_id, operating_account_id, costs, company_id)
+            if (recovery_acct["account_type"] or "") == "receivable" and not customer_id:
+                err(f"--costs-recovery-account-id account '{recovery_acct['name']}' is a receivable account but matter {matter_id} has no core customer to carry as the party")
+            if recovery_acct["root_type"] == "expense":
+                if not cost_center_id:
+                    err(f"--cost-center-id is required to post the costs recovery to expense account '{recovery_acct['name']}' (no company default cost center is set)")
+                _validate_cost_center(conn, cost_center_id, company_id)
+
+    try:
+        flip_q = (
+            Q.update(_settlement)
+            .set(_settlement.status, P())
+            .where(_settlement.id == P())
+            .where(_settlement.status == P())
+        )
+        cur = conn.execute(flip_q.get_sql(), ("disbursed", s_id, "pending"))
+        if cur.rowcount != 1:
+            conn.rollback()
+            err(f"Settlement {s_id} is no longer pending; nothing was written")
+
+        lines = [
+            ("client", net, client_name, "Settlement net to client"),
+            ("fee", fee, firm_name, "Settlement contingency fee"),
+            ("costs", costs, firm_name, "Settlement costs reimbursement"),
+        ]
+        trust_transaction_ids = []
+        gl_entry_ids = []
+        new_balance = str(current_balance)
+        for line_kind, line_amount, line_payee, line_description in lines:
+            if line_amount == 0:
+                continue
+            written = trust.write_trust_disbursement(
+                conn, ta_id, line_amount, line_payee, matter_id,
+                transaction_date, s_id, line_description, company_id,
+            )
+            trust_transaction_ids.append(written["id"])
+            gl_entry_ids.extend(written["gl_entry_ids"])
+            if line_kind == "fee" and fee_acct is not None:
+                firm_ids = insert_gl_entries(
+                    conn,
+                    [
+                        {"account_id": operating_account_id, "debit": str(fee), "credit": "0"},
+                        {"account_id": fee_income_account_id, "debit": "0", "credit": str(fee),
+                         "cost_center_id": cost_center_id},
+                    ],
+                    voucher_type="Trust Disbursement",
+                    voucher_id=written["id"],
+                    posting_date=transaction_date,
+                    company_id=company_id,
+                    entry_set="firm_receipt",
+                )
+                _append_trust_txn_gl_ids(conn, written["id"], written["gl_entry_ids"] + firm_ids)
+                gl_entry_ids.extend(firm_ids)
+            if line_kind == "costs" and recovery_acct is not None:
+                credit_leg = {"account_id": costs_recovery_account_id, "debit": "0", "credit": str(costs)}
+                if (recovery_acct["account_type"] or "") == "receivable":
+                    credit_leg["party_type"] = "customer"
+                    credit_leg["party_id"] = customer_id
+                if recovery_acct["root_type"] == "expense":
+                    credit_leg["cost_center_id"] = cost_center_id
+                firm_ids = insert_gl_entries(
+                    conn,
+                    [
+                        {"account_id": operating_account_id, "debit": str(costs), "credit": "0"},
+                        credit_leg,
+                    ],
+                    voucher_type="Trust Disbursement",
+                    voucher_id=written["id"],
+                    posting_date=transaction_date,
+                    company_id=company_id,
+                    entry_set="firm_receipt",
+                )
+                _append_trust_txn_gl_ids(conn, written["id"], written["gl_entry_ids"] + firm_ids)
+                gl_entry_ids.extend(firm_ids)
+            audit(conn, SKILL, "legal-disburse-settlement", "legalclaw_trust_transaction", written["id"])
+            new_balance = written["new_balance"]
+
+        audit(conn, SKILL, "legal-disburse-settlement", "legalclaw_settlement", s_id)
+        conn.commit()
+    except ValueError as e:
+        conn.rollback()
+        err(f"Settlement {s_id} could not be disbursed; nothing was written: {e}")
+
+    result = {
+        "settlement_id": s_id,
+        "settlement_status": "disbursed",
+        "trust_account_id": ta_id,
+        "amount_disbursed": str(total),
+        "trust_transaction_ids": trust_transaction_ids,
+        "new_balance": new_balance,
+        "fee_income_posted": _money2(fee) if fee_acct is not None else "0.00",
+        "costs_recovered": _money2(costs) if recovery_acct is not None else "0.00",
+    }
+    if gl_entry_ids:
+        result["gl_entry_ids"] = gl_entry_ids
+    ok(result)
 
 
 def settlement_report(conn, args):
@@ -927,8 +1211,7 @@ def add_communication(conn, args):
         getattr(args, "company_id", None),
         n,
     ))
-    audit(conn, "legalclaw_communication", c_id, "legal-add-communication",
-          getattr(args, "company_id", None))
+    audit(conn, SKILL, "legal-add-communication", "legalclaw_communication", c_id)
     conn.commit()
     ok({"communication_id": c_id, "matter_id": matter_id,
         "comm_type": comm_type, "direction": direction})

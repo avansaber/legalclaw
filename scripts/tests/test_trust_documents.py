@@ -28,6 +28,8 @@ from legal_helpers import (
 _mod = load_db_query()
 ACTIONS = _mod.ACTIONS
 
+from erpclaw_lib.query import P, Q, Table  # noqa: E402
+
 
 # ── Trust Account Tests ────────────────────────────────────────────────
 
@@ -160,6 +162,7 @@ class TestDisburseTrust:
                 company_id=env["company_id"],
                 trust_account_id=env["trust_account_id"],
                 amount="10000.00",
+                matter_id=env["matter_id"],
             ),
         )
         result = call_action(
@@ -175,6 +178,10 @@ class TestDisburseTrust:
         assert is_ok(result), result
         assert result["transaction_type"] == "disbursement"
         assert result["new_balance"] == "7000.00"
+        matter_table = Table("legalclaw_matter")
+        matter_query = Q.from_(matter_table).select(matter_table.trust_balance).where(matter_table.id == P())
+        stored_balance = conn.execute(matter_query.get_sql(), (env["matter_id"],)).fetchone()["trust_balance"]
+        assert stored_balance == "7000.00"
 
     def test_disburse_insufficient(self, conn, env):
         result = call_action(

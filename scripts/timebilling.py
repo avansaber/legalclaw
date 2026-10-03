@@ -34,6 +34,8 @@ except ImportError:
 
 _now_iso = lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+SKILL = "legalclaw"
+
 # ---------------------------------------------------------------------------
 # Validation constants
 # ---------------------------------------------------------------------------
@@ -155,7 +157,7 @@ def add_time_entry(conn, args):
         is_billable, 0, None,
         args.company_id, now, now,
     ))
-    audit(conn, "legalclaw_time_entry", te_id, "legal-add-time-entry", args.company_id)
+    audit(conn, SKILL, "legal-add-time-entry", "legalclaw_time_entry", te_id)
     conn.commit()
     ok({
         "id": te_id, "matter_id": matter_id, "attorney": attorney,
@@ -218,8 +220,7 @@ def update_time_entry(conn, args):
     data["updated_at"] = _now_iso()
     sql, params = dynamic_update("legalclaw_time_entry", data, where={"id": te_id})
     conn.execute(sql, params)
-    audit(conn, "legalclaw_time_entry", te_id, "legal-update-time-entry",
-          getattr(args, "company_id", None))
+    audit(conn, SKILL, "legal-update-time-entry", "legalclaw_time_entry", te_id)
     conn.commit()
     ok({"id": te_id, "updated_fields": changed})
 
@@ -288,7 +289,7 @@ def add_expense(conn, args):
         getattr(args, "receipt_reference", None),
         args.company_id, _now_iso(),
     ))
-    audit(conn, "legalclaw_expense", exp_id, "legal-add-expense", args.company_id)
+    audit(conn, SKILL, "legal-add-expense", "legalclaw_expense", exp_id)
     conn.commit()
     ok({"id": exp_id, "matter_id": matter_id, "amount": amount, "category": category})
 
@@ -335,8 +336,7 @@ def update_expense(conn, args):
 
     sql, params = dynamic_update("legalclaw_expense", data, where={"id": exp_id})
     conn.execute(sql, params)
-    audit(conn, "legalclaw_expense", exp_id, "legal-update-expense",
-          getattr(args, "company_id", None))
+    audit(conn, SKILL, "legal-update-expense", "legalclaw_expense", exp_id)
     conn.commit()
     ok({"id": exp_id, "updated_fields": changed})
 
@@ -450,12 +450,9 @@ def generate_invoice(conn, args):
                 company_id=args.company_id,
                 posting_date=invoice_date,
                 due_date=due_date,
-                remarks=f"LegalClaw invoice for matter: {matter_title}",
                 db_path=db_path,
             )
-            # Extract the sales_invoice id from the response
-            si = inv_result.get("sales_invoice") or inv_result.get("data", {})
-            sales_invoice_id = si.get("id") if isinstance(si, dict) else None
+            sales_invoice_id = inv_result.get("sales_invoice_id")
 
             # Auto-submit the sales invoice to post GL entries
             if sales_invoice_id:
@@ -502,7 +499,7 @@ def generate_invoice(conn, args):
         where={"id": matter_id})
     conn.execute(sql_upd, params_upd)
 
-    audit(conn, "legalclaw_invoice", inv_id, "legal-generate-invoice", args.company_id)
+    audit(conn, SKILL, "legal-generate-invoice", "legalclaw_invoice", inv_id)
     conn.commit()
 
     result = {
@@ -618,8 +615,7 @@ def send_invoice(conn, args):
         {"status": "sent", "updated_at": now},
         where={"id": inv_id})
     conn.execute(sql, params)
-    audit(conn, "legalclaw_invoice", inv_id, "legal-send-invoice",
-          getattr(args, "company_id", None))
+    audit(conn, SKILL, "legal-send-invoice", "legalclaw_invoice", inv_id)
     conn.commit()
     result = {"id": inv_id, "invoice_status": "sent"}
     if si_id:
@@ -711,8 +707,7 @@ def record_payment(conn, args):
         where={"id": matter_id})
     conn.execute(sql_m, params_m)
 
-    audit(conn, "legalclaw_invoice", inv_id, "legal-record-payment",
-          getattr(args, "company_id", None))
+    audit(conn, SKILL, "legal-record-payment", "legalclaw_invoice", inv_id)
     conn.commit()
 
     result = {
@@ -813,8 +808,7 @@ def write_off_invoice(conn, args):
         {"status": "written_off", "balance": "0", "updated_at": now},
         where={"id": inv_id})
     conn.execute(sql, params)
-    audit(conn, "legalclaw_invoice", inv_id, "legal-write-off-invoice",
-          getattr(args, "company_id", None))
+    audit(conn, SKILL, "legal-write-off-invoice", "legalclaw_invoice", inv_id)
     conn.commit()
     ok({"id": inv_id, "invoice_status": "written_off",
         "written_off_amount": row["balance"],

@@ -813,3 +813,102 @@ class TestArAgingReport:
         )
         assert is_ok(result), result
         assert result["total_outstanding"] == "0"
+
+
+# ── Cross-skill sales-invoice bridge: REAL selling function in-process ──────
+
+def _delegate_selling_in_process(conn, monkeypatch):
+    """Redirect cross_skill.call_skill_action to the REAL foundation functions.
+
+    call_skill_action shells out to the INSTALLED skill tree, which is neither
+    this worktree's code nor this test's database. Running the genuine
+    inventory/selling functions in-process instead keeps every assertion real
+    (item resolution, totals, GL postings) while still recording exactly which
+    action and flags the vertical sent through the shared library.
+    """
+    import argparse
+    selling = _load_foundation("erpclaw-selling")
+    inventory = _load_foundation("erpclaw-inventory")
+    sys.path.insert(0, os.path.join(_FOUNDATION_SCRIPTS, "erpclaw-setup", "lib"))
+    from erpclaw_lib import cross_skill as _cs
+    captured = {}
+
+    def _run(fn, args_ns):
+        buf = io.StringIO()
+
+        def _fake_exit(code=0):
+            raise SystemExit(code)
+
+        try:
+            with patch("sys.stdout", buf), patch("sys.exit", side_effect=_fake_exit):
+                fn(conn, args_ns)
+        except SystemExit:
+            pass
+        return json.loads(buf.getvalue().strip())
+
+    def _in_process(skill_name, action, args=None, db_path=None, timeout=30):
+        flags = dict(args or {})
+        captured.setdefault("calls", []).append(
+            {"skill": skill_name, "action": action, "args": flags})
+        if action == "add-item":
+            result = _run(inventory.add_item, argparse.Namespace(
+                item_code=flags.get("--item-code"),
+                item_name=flags.get("--item-name"),
+                item_type=flags.get("--item-type"),
+                valuation_method=None, item_group=None, stock_uom=None,
+                has_batch=None, has_serial=None, standard_rate=None,
+                custom_fields=None))
+        elif action == "list-items":
+            result = _run(inventory.list_items, argparse.Namespace(
+                item_group=None, item_type=None, search=flags.get("--search"),
+                limit="20", offset="0", warehouse_id=None, company_id=None))
+        elif action == "create-sales-invoice":
+            result = _run(selling.create_sales_invoice, argparse.Namespace(
+                company_id=flags.get("--company-id"),
+                customer_id=flags.get("--customer-id"),
+                tax_template_id=None, sales_order_id=None,
+                delivery_note_id=None,
+                posting_date=flags.get("--posting-date"),
+                due_date=flags.get("--due-date"),
+                items=flags.get("--items"), payment_terms_id=None))
+        elif action == "submit-sales-invoice":
+            result = _run(selling.submit_sales_invoice, argparse.Namespace(
+                sales_invoice_id=flags.get("--sales-invoice-id")))
+        else:
+            raise AssertionError(f"unexpected cross-skill action {action}")
+        if result.get("status") == "error":
+            raise _timebilling.CrossSkillError(
+                result.get("message", f"{action} failed"))
+        return result
+
+    monkeypatch.setattr(_cs, "call_skill_action", _in_process)
+    return captured
+
+
+class TestGenerateInvoiceSellingBridge:
+    def test_generate_invoice_links_and_submits_sales_invoice(
+            self, conn, env, monkeypatch):
+        captured = _delegate_selling_in_process(conn, monkeypatch)
+        seed_time_entry(conn, env["matter_id"], env["company_id"],
+                        attorney="J. Smith", hours="2.0", rate="250.00")
+        seed_expense(conn, env["matter_id"], env["company_id"],
+                     amount="150.00")
+        result = call_action(
+            ACTIONS["legal-generate-invoice"], conn,
+            ns(company_id=env["company_id"], matter_id=env["matter_id"]),
+        )
+        assert is_ok(result), result
+        assert result.get("sales_invoice_id"), result
+        assert "cross_skill_warning" not in result
+        si = conn.execute(
+            "SELECT grand_total, status FROM sales_invoice WHERE id = ?",
+            (result["sales_invoice_id"],)).fetchone()
+        assert si["grand_total"] == "650.00"
+        assert si["status"] == "submitted"
+        inv = conn.execute(
+            "SELECT sales_invoice_id FROM legalclaw_invoice WHERE id = ?",
+            (result["id"],)).fetchone()
+        assert inv["sales_invoice_id"] == result["sales_invoice_id"]
+        sent_items = json.loads(
+            captured["calls"][1]["args"]["--items"])
+        assert all("item_id" in line for line in sent_items)

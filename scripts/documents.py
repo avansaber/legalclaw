@@ -27,6 +27,8 @@ except ImportError:
 
 _now_iso = lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+SKILL = "legalclaw"
+
 VALID_DOCUMENT_TYPES = (
     "pleading", "motion", "brief", "contract", "correspondence",
     "discovery", "evidence", "order", "general", "other",
@@ -98,7 +100,7 @@ def add_legal_document(conn, args):
         getattr(args, "court_reference", None),
         args.company_id, now, now,
     ))
-    audit(conn, "legalclaw_document", doc_id, "legal-add-legal-document", args.company_id)
+    audit(conn, SKILL, "legal-add-legal-document", "legalclaw_document", doc_id)
     conn.commit()
     ok({
         "id": doc_id, "naming_series": ns, "title": title,
@@ -142,8 +144,7 @@ def update_legal_document(conn, args):
     data["updated_at"] = _now_iso()
     sql, params = dynamic_update("legalclaw_document", data, where={"id": doc_id})
     conn.execute(sql, params)
-    audit(conn, "legalclaw_document", doc_id, "legal-update-legal-document",
-          getattr(args, "company_id", None))
+    audit(conn, SKILL, "legal-update-legal-document", "legalclaw_document", doc_id)
     conn.commit()
     ok({"id": doc_id, "updated_fields": changed})
 
@@ -209,8 +210,7 @@ def file_document(conn, args):
         data["court_reference"] = court_reference
     sql, params = dynamic_update("legalclaw_document", data, where={"id": doc_id})
     conn.execute(sql, params)
-    audit(conn, "legalclaw_document", doc_id, "legal-file-document",
-          getattr(args, "company_id", None))
+    audit(conn, SKILL, "legal-file-document", "legalclaw_document", doc_id)
     conn.commit()
     ok({"id": doc_id, "document_status": "filed", "filed_date": filed_date})
 
@@ -230,8 +230,7 @@ def archive_document(conn, args):
         {"status": "archived", "updated_at": now},
         where={"id": doc_id})
     conn.execute(sql, params)
-    audit(conn, "legalclaw_document", doc_id, "legal-archive-document",
-          getattr(args, "company_id", None))
+    audit(conn, SKILL, "legal-archive-document", "legalclaw_document", doc_id)
     conn.commit()
     ok({"id": doc_id, "document_status": "archived"})
 
@@ -298,8 +297,7 @@ def add_document_version(conn, args):
         sql2, params2 = dynamic_update("legalclaw_document", {"status": "draft"}, where={"id": doc_id})
         conn.execute(sql2, params2)
 
-    audit(conn, "legalclaw_document", doc_id, "legal-add-document-version",
-          getattr(args, "company_id", None))
+    audit(conn, SKILL, "legal-add-document-version", "legalclaw_document", doc_id)
     conn.commit()
     ok({"id": doc_id, "previous_version": current_version, "new_version": new_version,
         "document_status": "draft"})

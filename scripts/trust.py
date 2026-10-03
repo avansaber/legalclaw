@@ -30,6 +30,8 @@ except ImportError:
 
 _now_iso = lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+SKILL = "legalclaw"
+
 VALID_ACCOUNT_TYPES = ("iolta", "escrow", "retainer", "other")
 VALID_TRANSACTION_TYPES = ("deposit", "disbursement", "transfer", "interest", "fee")
 
@@ -111,7 +113,7 @@ def add_trust_account(conn, args):
         gl_account_id, trust_liability_account_id, interest_income_account_id,
         args.company_id, now, now,
     ))
-    audit(conn, "legalclaw_trust_account", ta_id, "legal-add-trust-account", args.company_id)
+    audit(conn, SKILL, "legal-add-trust-account", "legalclaw_trust_account", ta_id)
     conn.commit()
     ok({"id": ta_id, "naming_series": ns, "name": name, "account_type": account_type,
         "current_balance": "0",
@@ -222,7 +224,7 @@ def deposit_trust(conn, args):
             where={"id": txn_id})
         conn.execute(sql_gl, params_gl)
 
-    audit(conn, "legalclaw_trust_transaction", txn_id, "legal-deposit-trust", args.company_id)
+    audit(conn, SKILL, "legal-deposit-trust", "legalclaw_trust_transaction", txn_id)
     conn.commit()
     result = {
         "id": txn_id, "trust_account_id": ta_id, "transaction_type": "deposit",
@@ -235,52 +237,45 @@ def deposit_trust(conn, args):
 
 
 # ---------------------------------------------------------------------------
-# 5. disburse-trust
+# Shared write path: one trust disbursement line
 # ---------------------------------------------------------------------------
-def disburse_trust(conn, args):
-    ta_id = getattr(args, "trust_account_id", None)
-    ta_row = _validate_trust_account(conn, ta_id)
-    _validate_company(conn, args.company_id)
+def write_trust_disbursement(conn, trust_account_id, amount, payee, matter_id,
+                             transaction_date, reference, description, company_id):
+    """Write one trust disbursement line inside the caller's transaction.
 
-    amount_raw = getattr(args, "amount", None)
-    if not amount_raw:
-        err("--amount is required")
-    amount = to_decimal(amount_raw)
-    if amount <= 0:
-        err("Disbursement amount must be greater than 0")
+    The shared write half of legal-disburse-trust, reused by
+    legal-disburse-settlement so both actions move trust money the same way.
+    Re-reads the trust account row itself, so a second call in the same
+    transaction sees the first call's balance. Inserts the disbursement
+    transaction, lowers the trust account balance and the matter trust balance
+    (when a matter is given), and posts the Trust Disbursement GL legs when
+    the account is GL-linked, exactly as legal-disburse-trust always has.
 
+    Returns {"id", "new_balance", "gl_entry_ids"}. Performs no validation,
+    audit, commit or ok/err response; lets ValueError propagate so the caller
+    can roll the whole transaction back.
+    """
+    ta_q = Q.from_(_ta).select(_ta.star).where(_ta.id == P())
+    ta_row = conn.execute(ta_q.get_sql(), (trust_account_id,)).fetchone()
+    amount = to_decimal(amount)
     current_balance = to_decimal(ta_row["current_balance"])
-    if amount > current_balance:
-        err(f"Insufficient trust balance: {current_balance} available, {amount} requested")
-
-    matter_id = getattr(args, "matter_id", None)
-    if matter_id:
-        mq = Q.from_(_matter).select(_matter.id).where(_matter.id == P())
-        if not conn.execute(mq.get_sql(), (matter_id,)).fetchone():
-            err(f"Matter {matter_id} not found")
-
-    payee = getattr(args, "payee", None)
-    if not payee:
-        err("--payee is required for disbursements")
-
-    transaction_date = getattr(args, "transaction_date", None) or datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     txn_id = str(uuid.uuid4())
     now = _now_iso()
     sql, _ = insert_row("legalclaw_trust_transaction", {"id": P(), "trust_account_id": P(), "matter_id": P(), "transaction_type": P(), "transaction_date": P(), "amount": P(), "reference": P(), "payee": P(), "description": P(), "company_id": P(), "created_at": P()})
     conn.execute(sql, (
-        txn_id, ta_id, matter_id, "disbursement", transaction_date,
+        txn_id, trust_account_id, matter_id, "disbursement", transaction_date,
         str(amount),
-        getattr(args, "reference", None),
+        reference,
         payee,
-        getattr(args, "trust_description", None),
-        args.company_id, now,
+        description,
+        company_id, now,
     ))
 
     new_balance = current_balance - amount
     sql_u, params_u = dynamic_update("legalclaw_trust_account",
         {"current_balance": str(new_balance), "updated_at": now},
-        where={"id": ta_id})
+        where={"id": trust_account_id})
     conn.execute(sql_u, params_u)
 
     # Update matter trust_balance if matter specified (Decimal math in Python, not SQL CAST)
@@ -304,18 +299,67 @@ def disburse_trust(conn, args):
         gl_entry_ids = insert_gl_entries(
             conn, entries, voucher_type="Trust Disbursement",
             voucher_id=txn_id, posting_date=transaction_date,
-            company_id=args.company_id,
+            company_id=company_id,
         )
         sql_gl, params_gl = dynamic_update("legalclaw_trust_transaction",
             {"gl_entry_ids": ",".join(gl_entry_ids)},
             where={"id": txn_id})
         conn.execute(sql_gl, params_gl)
 
-    audit(conn, "legalclaw_trust_transaction", txn_id, "legal-disburse-trust", args.company_id)
+    return {"id": txn_id, "new_balance": str(new_balance), "gl_entry_ids": gl_entry_ids}
+
+
+# ---------------------------------------------------------------------------
+# 5. disburse-trust
+# ---------------------------------------------------------------------------
+def disburse_trust(conn, args):
+    ta_id = getattr(args, "trust_account_id", None)
+    ta_row = _validate_trust_account(conn, ta_id)
+    _validate_company(conn, args.company_id)
+
+    amount_raw = getattr(args, "amount", None)
+    if not amount_raw:
+        err("--amount is required")
+    amount = to_decimal(amount_raw)
+    if amount <= 0:
+        err("Disbursement amount must be greater than 0")
+
+    current_balance = to_decimal(ta_row["current_balance"])
+    if amount > current_balance:
+        err(f"Insufficient trust balance: {current_balance} available, {amount} requested")
+
+    matter_id = getattr(args, "matter_id", None)
+    if matter_id:
+        mq = Q.from_(_matter).select(_matter.id, _matter.trust_balance).where(_matter.id == P())
+        matter_row = conn.execute(mq.get_sql(), (matter_id,)).fetchone()
+        if not matter_row:
+            err(f"Matter {matter_id} not found")
+        matter_balance_text = matter_row["trust_balance"] if matter_row["trust_balance"] is not None else "0"
+        matter_balance = to_decimal(matter_balance_text)
+        if amount > matter_balance:
+            err(f"Insufficient trust balance for matter {matter_id}: {matter_balance_text} available, {amount} requested")
+
+    payee = getattr(args, "payee", None)
+    if not payee:
+        err("--payee is required for disbursements")
+
+    transaction_date = getattr(args, "transaction_date", None) or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    written = write_trust_disbursement(
+        conn, ta_id, amount, payee, matter_id, transaction_date,
+        getattr(args, "reference", None),
+        getattr(args, "trust_description", None),
+        args.company_id,
+    )
+    txn_id = written["id"]
+    new_balance = written["new_balance"]
+    gl_entry_ids = written["gl_entry_ids"]
+
+    audit(conn, SKILL, "legal-disburse-trust", "legalclaw_trust_transaction", txn_id)
     conn.commit()
     result = {
         "id": txn_id, "trust_account_id": ta_id, "transaction_type": "disbursement",
-        "amount": str(amount), "payee": payee, "new_balance": str(new_balance),
+        "amount": str(amount), "payee": payee, "new_balance": new_balance,
         "matter_id": matter_id,
     }
     if gl_entry_ids:
@@ -411,7 +455,7 @@ def transfer_trust(conn, args):
             {"gl_entry_ids": gl_ids_str}, where={"id": credit_id})
         conn.execute(sql_g2, p_g2)
 
-    audit(conn, "legalclaw_trust_account", from_id, "legal-transfer-trust", args.company_id)
+    audit(conn, SKILL, "legal-transfer-trust", "legalclaw_trust_account", from_id)
     conn.commit()
     result = {
         "from_account_id": from_id, "to_account_id": to_id,
@@ -624,7 +668,7 @@ def trust_interest_distribution(conn, args):
             where={"id": txn_id})
         conn.execute(sql_gl, params_gl)
 
-    audit(conn, "legalclaw_trust_transaction", txn_id, "legal-trust-interest-distribution", args.company_id)
+    audit(conn, SKILL, "legal-trust-interest-distribution", "legalclaw_trust_transaction", txn_id)
     conn.commit()
     result = {
         "id": txn_id, "trust_account_id": ta_id, "transaction_type": "interest",

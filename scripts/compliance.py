@@ -29,6 +29,8 @@ except ImportError:
 
 _now_iso = lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+SKILL = "legalclaw"
+
 VALID_BAR_STATUSES = ("active", "inactive", "suspended", "retired")
 VALID_CLE_CATEGORIES = ("general", "ethics", "professionalism", "diversity", "substance_abuse", "other")
 DEFAULT_DB_PATH = os.path.join(os.path.expanduser(os.environ.get("ERPCLAW_HOME", "~/.openclaw/erpclaw")), "data.sqlite")
@@ -94,7 +96,7 @@ def add_bar_admission(conn, args):
         admission_status, cle_required, "0",
         args.company_id, now, now,
     ))
-    audit(conn, "legalclaw_bar_admission", ba_id, "legal-add-bar-admission", args.company_id)
+    audit(conn, SKILL, "legal-add-bar-admission", "legalclaw_bar_admission", ba_id)
     conn.commit()
     ok({
         "id": ba_id, "attorney_name": attorney_name,
@@ -140,8 +142,7 @@ def update_bar_admission(conn, args):
     data["updated_at"] = _now_iso()
     sql, params = dynamic_update("legalclaw_bar_admission", data, where={"id": ba_id})
     conn.execute(sql, params)
-    audit(conn, "legalclaw_bar_admission", ba_id, "legal-update-bar-admission",
-          getattr(args, "company_id", None))
+    audit(conn, SKILL, "legal-update-bar-admission", "legalclaw_bar_admission", ba_id)
     conn.commit()
     ok({"id": ba_id, "updated_fields": changed})
 
@@ -230,7 +231,7 @@ def add_cle_record(conn, args):
         )
         conn.execute(upd_q.get_sql(), (float(to_decimal(hours)), now, bar_admission_id))
 
-    audit(conn, "legalclaw_cle_record", cle_id, "legal-add-cle-record", args.company_id)
+    audit(conn, SKILL, "legal-add-cle-record", "legalclaw_cle_record", cle_id)
     conn.commit()
     ok({
         "id": cle_id, "attorney_name": attorney_name,

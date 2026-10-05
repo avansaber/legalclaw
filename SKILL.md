@@ -95,7 +95,7 @@ python3 {baseDir}/scripts/db_query.py --action status
 | `legal-disburse-trust` | Disburse from trust |
 | `legal-transfer-trust` | Transfer between trust accounts |
 | `legal-list-trust-transactions` | List trust transactions |
-| `legal-trust-reconciliation` | Reconcile trust account |
+| `legal-trust-reconciliation` | Reconcile trust account (--trust-account-id, --statement-balance) |
 | `legal-trust-balance-report` | Trust balance report |
 | `legal-trust-interest-distribution` | Distribute trust interest |
 

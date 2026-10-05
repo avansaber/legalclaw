@@ -150,6 +150,7 @@ def main():
     parser.add_argument("--reference")
     parser.add_argument("--payee")
     parser.add_argument("--trust-description")
+    parser.add_argument("--statement-balance")
 
     # == DOCUMENTS domain ==
     parser.add_argument("--document-id")

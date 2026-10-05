@@ -7,7 +7,7 @@ import os
 import sys
 import uuid
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 try:
     import importlib.util
@@ -502,7 +502,21 @@ def trust_reconciliation(conn, args):
     ta_id = getattr(args, "trust_account_id", None)
     ta_row = _validate_trust_account(conn, ta_id)
 
-    book_balance = to_decimal(ta_row["current_balance"])
+    raw_statement = getattr(args, "statement_balance", None)
+    if raw_statement is None or (isinstance(raw_statement, str) and raw_statement.strip() == ""):
+        err("--statement-balance is required")
+    try:
+        statement_balance = to_decimal(raw_statement)
+    except (ValueError, TypeError, InvalidOperation):
+        err(f"Invalid --statement-balance: {raw_statement!r}")
+    if not statement_balance.is_finite():
+        err(f"Invalid --statement-balance: {raw_statement!r}")
+    try:
+        statement_balance = round_currency(statement_balance)
+    except (ValueError, TypeError, InvalidOperation):
+        err(f"Invalid --statement-balance: {raw_statement!r}")
+
+    book_balance = round_currency(to_decimal(ta_row["current_balance"] or "0"))
 
     # Calculate balance from transactions (TEXT amounts, Decimal math in Python)
     txn_q = (
@@ -512,12 +526,12 @@ def trust_reconciliation(conn, args):
     )
     txn_rows = conn.execute(txn_q.get_sql(), (ta_id,)).fetchall()
 
-    deposits = sum(to_decimal(r["amount"]) for r in txn_rows if r["transaction_type"] in ("deposit", "interest"))
-    withdrawals = sum(to_decimal(r["amount"]) for r in txn_rows if r["transaction_type"] in ("disbursement", "fee"))
+    deposits = sum((to_decimal(r["amount"]) for r in txn_rows if r["transaction_type"] in ("deposit", "interest")), Decimal("0"))
+    withdrawals = sum((to_decimal(r["amount"]) for r in txn_rows if r["transaction_type"] in ("disbursement", "fee")), Decimal("0"))
 
     # For transfers: outgoing = debit, incoming = credit (both stored as "transfer")
     # We track them by description convention; for simplicity, use net of deposits - withdrawals
-    calc_balance = deposits - withdrawals
+    calc_balance = round_currency(deposits - withdrawals)
 
     # Per-matter breakdown (fetch raw TEXT amounts, aggregate in Python)
     matter_txn_q = (
@@ -549,23 +563,28 @@ def trust_reconciliation(conn, args):
         client_ledger.append({
             "matter_id": mid,
             "title": md["title"],
-            "deposits": str(md["deposits"]),
-            "withdrawals": str(md["withdrawals"]),
-            "balance": str(md["deposits"] - md["withdrawals"]),
+            "deposits": str(round_currency(md["deposits"])),
+            "withdrawals": str(round_currency(md["withdrawals"])),
+            "balance": str(round_currency(md["deposits"] - md["withdrawals"])),
         })
 
-    client_total = sum(to_decimal(c["balance"]) for c in client_ledger)
-    is_reconciled = (book_balance == calc_balance)
+    client_total = round_currency(sum((to_decimal(c["balance"]) for c in client_ledger), Decimal("0")))
+    statement_to_book_difference = round_currency(statement_balance - book_balance)
+    book_to_client_difference = round_currency(book_balance - client_total)
+    is_reconciled = (statement_balance == book_balance == calc_balance == client_total)
 
     ok({
         "trust_account_id": ta_id,
         "account_name": ta_row["name"],
+        "statement_balance": str(statement_balance),
         "book_balance": str(book_balance),
         "calculated_balance": str(calc_balance),
         "client_ledger_total": str(client_total),
+        "statement_to_book_difference": str(statement_to_book_difference),
+        "book_to_client_difference": str(book_to_client_difference),
         "is_reconciled": is_reconciled,
-        "total_deposits": str(deposits),
-        "total_withdrawals": str(withdrawals),
+        "total_deposits": str(round_currency(deposits)),
+        "total_withdrawals": str(round_currency(withdrawals)),
         "client_ledger": client_ledger,
     })
 

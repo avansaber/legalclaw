@@ -294,11 +294,137 @@ class TestTrustReconciliation:
         )
         result = call_action(
             ACTIONS["legal-trust-reconciliation"], conn,
-            ns(trust_account_id=env["trust_account_id"]),
+            ns(
+                trust_account_id=env["trust_account_id"],
+                statement_balance="5000.00",
+            ),
         )
         assert is_ok(result), result
         assert result["book_balance"] == "5000.00"
         assert result["is_reconciled"] is True
+
+    def test_three_way_reconciled_exact(self, conn, env):
+        matter_two = seed_matter(
+            conn, env["client_ext_id"], env["company_id"],
+            title="Second Matter",
+        )
+        call_action(
+            ACTIONS["legal-deposit-trust"], conn,
+            ns(
+                company_id=env["company_id"],
+                trust_account_id=env["trust_account_id"],
+                amount="100.10",
+                matter_id=env["matter_id"],
+            ),
+        )
+        call_action(
+            ACTIONS["legal-deposit-trust"], conn,
+            ns(
+                company_id=env["company_id"],
+                trust_account_id=env["trust_account_id"],
+                amount="200.20",
+                matter_id=matter_two,
+            ),
+        )
+        result = call_action(
+            ACTIONS["legal-trust-reconciliation"], conn,
+            ns(
+                trust_account_id=env["trust_account_id"],
+                statement_balance="300.30",
+            ),
+        )
+        assert is_ok(result), result
+        assert result["statement_balance"] == "300.30"
+        assert result["book_balance"] == "300.30"
+        assert result["calculated_balance"] == "300.30"
+        assert result["client_ledger_total"] == "300.30"
+        assert result["statement_to_book_difference"] == "0.00"
+        assert result["book_to_client_difference"] == "0.00"
+        assert result["is_reconciled"] is True
+
+    def test_statement_mismatch_not_reconciled(self, conn, env):
+        matter_two = seed_matter(
+            conn, env["client_ext_id"], env["company_id"],
+            title="Second Matter",
+        )
+        call_action(
+            ACTIONS["legal-deposit-trust"], conn,
+            ns(
+                company_id=env["company_id"],
+                trust_account_id=env["trust_account_id"],
+                amount="100.10",
+                matter_id=env["matter_id"],
+            ),
+        )
+        call_action(
+            ACTIONS["legal-deposit-trust"], conn,
+            ns(
+                company_id=env["company_id"],
+                trust_account_id=env["trust_account_id"],
+                amount="200.20",
+                matter_id=matter_two,
+            ),
+        )
+        result = call_action(
+            ACTIONS["legal-trust-reconciliation"], conn,
+            ns(
+                trust_account_id=env["trust_account_id"],
+                statement_balance="300.29",
+            ),
+        )
+        assert is_ok(result), result
+        assert result["is_reconciled"] is False
+        assert result["statement_balance"] == "300.29"
+        assert result["book_balance"] == "300.30"
+        assert result["statement_to_book_difference"] == "-0.01"
+
+    def test_missing_statement_refuses_and_no_write(self, conn, env):
+        call_action(
+            ACTIONS["legal-deposit-trust"], conn,
+            ns(
+                company_id=env["company_id"],
+                trust_account_id=env["trust_account_id"],
+                amount="100.10",
+                matter_id=env["matter_id"],
+            ),
+        )
+        trust_account_table = Table("legalclaw_trust_account")
+        trust_txn_table = Table("legalclaw_trust_transaction")
+        matter_table = Table("legalclaw_matter")
+        audit_table = Table("audit_log")
+        before_accounts = conn.execute(
+            Q.from_(trust_account_table).select(trust_account_table.id, trust_account_table.current_balance).get_sql()
+        ).fetchall()
+        before_txns = conn.execute(
+            Q.from_(trust_txn_table).select(trust_txn_table.id, trust_txn_table.amount).get_sql()
+        ).fetchall()
+        before_matters = conn.execute(
+            Q.from_(matter_table).select(matter_table.id, matter_table.trust_balance).get_sql()
+        ).fetchall()
+        before_audits = conn.execute(
+            Q.from_(audit_table).select(audit_table.id).get_sql()
+        ).fetchall()
+        result = call_action(
+            ACTIONS["legal-trust-reconciliation"], conn,
+            ns(trust_account_id=env["trust_account_id"]),
+        )
+        assert is_error(result), result
+        after_accounts = conn.execute(
+            Q.from_(trust_account_table).select(trust_account_table.id, trust_account_table.current_balance).get_sql()
+        ).fetchall()
+        after_txns = conn.execute(
+            Q.from_(trust_txn_table).select(trust_txn_table.id, trust_txn_table.amount).get_sql()
+        ).fetchall()
+        after_matters = conn.execute(
+            Q.from_(matter_table).select(matter_table.id, matter_table.trust_balance).get_sql()
+        ).fetchall()
+        after_audits = conn.execute(
+            Q.from_(audit_table).select(audit_table.id).get_sql()
+        ).fetchall()
+        assert [dict(r) for r in after_accounts] == [dict(r) for r in before_accounts]
+        assert [dict(r) for r in after_txns] == [dict(r) for r in before_txns]
+        assert [dict(r) for r in after_matters] == [dict(r) for r in before_matters]
+        assert [dict(r) for r in after_audits] == [dict(r) for r in before_audits]
 
 
 class TestTrustBalanceReport:

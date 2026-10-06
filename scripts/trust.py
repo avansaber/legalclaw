@@ -498,6 +498,28 @@ def list_trust_transactions(conn, args):
 # ---------------------------------------------------------------------------
 # 8. trust-reconciliation
 # ---------------------------------------------------------------------------
+def _reconciliation_direction(row):
+    transaction_type = row["transaction_type"]
+    if transaction_type in ("deposit", "interest"):
+        return "in"
+    if transaction_type in ("disbursement", "fee"):
+        return "out"
+    if transaction_type == "transfer":
+        description = row["description"] or ""
+        if description.startswith("Transfer to "):
+            return "out"
+        if description.startswith("Transfer from "):
+            return "in"
+        err(
+            f"Cannot reconcile transfer {row['id']}: "
+            "stored direction is ambiguous"
+        )
+    err(
+        f"Cannot reconcile transaction {row['id']}: "
+        f"unsupported type {transaction_type!r}"
+    )
+
+
 def trust_reconciliation(conn, args):
     ta_id = getattr(args, "trust_account_id", None)
     ta_row = _validate_trust_account(conn, ta_id)
@@ -521,16 +543,33 @@ def trust_reconciliation(conn, args):
     # Calculate balance from transactions (TEXT amounts, Decimal math in Python)
     txn_q = (
         Q.from_(_txn)
-        .select(_txn.transaction_type, _txn.amount)
+        .select(
+            _txn.id, _txn.transaction_type, _txn.amount,
+            _txn.description, _txn.matter_id, _txn.company_id,
+        )
         .where(_txn.trust_account_id == P())
     )
     txn_rows = conn.execute(txn_q.get_sql(), (ta_id,)).fetchall()
 
-    deposits = sum((to_decimal(r["amount"]) for r in txn_rows if r["transaction_type"] in ("deposit", "interest")), Decimal("0"))
-    withdrawals = sum((to_decimal(r["amount"]) for r in txn_rows if r["transaction_type"] in ("disbursement", "fee")), Decimal("0"))
+    classified = []
+    for row in txn_rows:
+        if row["company_id"] != ta_row["company_id"]:
+            err(
+                f"Cannot reconcile transaction {row['id']}: "
+                "company does not match the trust account"
+            )
+        classified.append((row, _reconciliation_direction(row)))
 
-    # For transfers: outgoing = debit, incoming = credit (both stored as "transfer")
-    # We track them by description convention; for simplicity, use net of deposits - withdrawals
+    deposits = sum(
+        (to_decimal(row["amount"]) for row, direction in classified
+         if direction == "in"),
+        Decimal("0"),
+    )
+    withdrawals = sum(
+        (to_decimal(row["amount"]) for row, direction in classified
+         if direction == "out"),
+        Decimal("0"),
+    )
     calc_balance = round_currency(deposits - withdrawals)
 
     # Per-matter breakdown (fetch raw TEXT amounts, aggregate in Python)
@@ -539,7 +578,9 @@ def trust_reconciliation(conn, args):
         .left_join(_matter).on(_txn.matter_id == _matter.id)
         .select(
             _txn.matter_id, _matter.id.as_("mid"), _matter.title,
-            _txn.transaction_type, _txn.amount,
+            _matter.company_id.as_("matter_company_id"),
+            _txn.id, _txn.transaction_type, _txn.amount,
+            _txn.description, _txn.company_id,
         )
         .where(_txn.trust_account_id == P())
         .where(_txn.matter_id.isnotnull())
@@ -549,13 +590,19 @@ def trust_reconciliation(conn, args):
     # Aggregate per-matter in Python with Decimal
     matter_data = {}
     for row in matter_txn_rows:
+        if (row["company_id"] != ta_row["company_id"]
+                or row["matter_company_id"] != ta_row["company_id"]):
+            err(
+                f"Cannot reconcile transaction {row['id']}: "
+                "company does not match its trust account and matter"
+            )
         mid = row["mid"]
         if mid not in matter_data:
             matter_data[mid] = {"title": row["title"], "deposits": Decimal("0"), "withdrawals": Decimal("0")}
         amt = to_decimal(row["amount"])
-        if row["transaction_type"] in ("deposit", "interest"):
+        if _reconciliation_direction(row) == "in":
             matter_data[mid]["deposits"] += amt
-        elif row["transaction_type"] in ("disbursement", "fee"):
+        else:
             matter_data[mid]["withdrawals"] += amt
 
     client_ledger = []
@@ -566,6 +613,30 @@ def trust_reconciliation(conn, args):
             "deposits": str(round_currency(md["deposits"])),
             "withdrawals": str(round_currency(md["withdrawals"])),
             "balance": str(round_currency(md["deposits"] - md["withdrawals"])),
+        })
+
+    account_deposits = sum(
+        (to_decimal(row["amount"]) for row, direction in classified
+         if row["matter_id"] is None
+         and row["transaction_type"] in ("interest", "transfer")
+         and direction == "in"),
+        Decimal("0"),
+    )
+    account_withdrawals = sum(
+        (to_decimal(row["amount"]) for row, direction in classified
+         if row["matter_id"] is None
+         and row["transaction_type"] == "transfer"
+         and direction == "out"),
+        Decimal("0"),
+    )
+    if account_deposits or account_withdrawals:
+        client_ledger.append({
+            "matter_id": None,
+            "title": "Account-level activity",
+            "deposits": str(round_currency(account_deposits)),
+            "withdrawals": str(round_currency(account_withdrawals)),
+            "balance": str(round_currency(
+                account_deposits - account_withdrawals)),
         })
 
     client_total = round_currency(sum((to_decimal(c["balance"]) for c in client_ledger), Decimal("0")))

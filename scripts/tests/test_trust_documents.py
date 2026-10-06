@@ -282,6 +282,23 @@ class TestListTrustTransactions:
 class TestTrustReconciliation:
     """legal-trust-reconciliation"""
 
+    @staticmethod
+    def _state(conn):
+        tables = (
+            "legalclaw_trust_account",
+            "legalclaw_trust_transaction",
+            "legalclaw_matter",
+            "audit_log",
+        )
+        return {
+            table: [
+                dict(row) for row in conn.execute(
+                    f"SELECT * FROM {table} ORDER BY id"
+                ).fetchall()
+            ]
+            for table in tables
+        }
+
     def test_reconciliation_ok(self, conn, env):
         call_action(
             ACTIONS["legal-deposit-trust"], conn,
@@ -341,6 +358,341 @@ class TestTrustReconciliation:
         assert result["statement_to_book_difference"] == "0.00"
         assert result["book_to_client_difference"] == "0.00"
         assert result["is_reconciled"] is True
+
+    def test_transfer_reconciles_source_and_destination(self, conn, env):
+        destination = seed_trust_account(
+            conn, env["company_id"], name="Transfer Destination",
+            account_type="escrow",
+        )
+        deposited = call_action(
+            ACTIONS["legal-deposit-trust"], conn,
+            ns(
+                company_id=env["company_id"],
+                trust_account_id=env["trust_account_id"],
+                amount="100.10",
+                matter_id=env["matter_id"],
+            ),
+        )
+        assert is_ok(deposited), deposited
+        transferred = call_action(
+            ACTIONS["legal-transfer-trust"], conn,
+            ns(
+                company_id=env["company_id"],
+                trust_account_id=env["trust_account_id"],
+                to_trust_account_id=destination,
+                amount="40.05",
+            ),
+        )
+        assert is_ok(transferred), transferred
+
+        source = call_action(
+            ACTIONS["legal-trust-reconciliation"], conn,
+            ns(
+                trust_account_id=env["trust_account_id"],
+                statement_balance="60.05",
+            ),
+        )
+        assert is_ok(source), source
+        assert source["book_balance"] == "60.05"
+        assert source["calculated_balance"] == "60.05"
+        assert source["client_ledger_total"] == "60.05"
+        assert source["total_deposits"] == "100.10"
+        assert source["total_withdrawals"] == "40.05"
+        assert source["is_reconciled"] is True
+        source_account_activity = next(
+            row for row in source["client_ledger"]
+            if row["matter_id"] is None
+        )
+        assert source_account_activity["balance"] == "-40.05"
+
+        target = call_action(
+            ACTIONS["legal-trust-reconciliation"], conn,
+            ns(
+                trust_account_id=destination,
+                statement_balance="40.05",
+            ),
+        )
+        assert is_ok(target), target
+        assert target["book_balance"] == "40.05"
+        assert target["calculated_balance"] == "40.05"
+        assert target["client_ledger_total"] == "40.05"
+        assert target["total_deposits"] == "40.05"
+        assert target["total_withdrawals"] == "0.00"
+        assert target["is_reconciled"] is True
+
+    def test_interest_is_account_level_client_activity(self, conn, env):
+        interest = call_action(
+            ACTIONS["legal-trust-interest-distribution"], conn,
+            ns(
+                company_id=env["company_id"],
+                trust_account_id=env["trust_account_id"],
+                amount="12.50",
+                transaction_date="2026-03-31",
+            ),
+        )
+        assert is_ok(interest), interest
+        result = call_action(
+            ACTIONS["legal-trust-reconciliation"], conn,
+            ns(
+                trust_account_id=env["trust_account_id"],
+                statement_balance="12.50",
+            ),
+        )
+        assert is_ok(result), result
+        assert result["book_balance"] == "12.50"
+        assert result["calculated_balance"] == "12.50"
+        assert result["client_ledger_total"] == "12.50"
+        assert result["total_deposits"] == "12.50"
+        assert result["total_withdrawals"] == "0.00"
+        assert result["client_ledger"] == [{
+            "matter_id": None,
+            "title": "Account-level activity",
+            "deposits": "12.50",
+            "withdrawals": "0.00",
+            "balance": "12.50",
+        }]
+        assert result["is_reconciled"] is True
+
+    def test_no_matter_disbursement_keeps_client_shortfall_unreconciled(
+            self, conn, env):
+        deposited = call_action(
+            ACTIONS["legal-deposit-trust"], conn,
+            ns(
+                company_id=env["company_id"],
+                trust_account_id=env["trust_account_id"],
+                amount="1000.00",
+                matter_id=env["matter_id"],
+            ),
+        )
+        assert is_ok(deposited), deposited
+        disbursed = call_action(
+            ACTIONS["legal-disburse-trust"], conn,
+            ns(
+                company_id=env["company_id"],
+                trust_account_id=env["trust_account_id"],
+                amount="300.00",
+                payee="Unassigned Payee",
+            ),
+        )
+        assert is_ok(disbursed), disbursed
+
+        result = call_action(
+            ACTIONS["legal-trust-reconciliation"], conn,
+            ns(
+                trust_account_id=env["trust_account_id"],
+                statement_balance="700.00",
+            ),
+        )
+        assert is_ok(result), result
+        assert result["book_balance"] == "700.00"
+        assert result["calculated_balance"] == "700.00"
+        assert result["client_ledger_total"] == "1000.00"
+        assert result["book_to_client_difference"] == "-300.00"
+        assert result["is_reconciled"] is False
+        assert all(
+            row["matter_id"] is not None
+            for row in result["client_ledger"]
+        )
+
+    def test_no_matter_deposit_stays_unassigned_and_unreconciled(
+            self, conn, env):
+        deposited = call_action(
+            ACTIONS["legal-deposit-trust"], conn,
+            ns(
+                company_id=env["company_id"],
+                trust_account_id=env["trust_account_id"],
+                amount="1000.00",
+            ),
+        )
+        assert is_ok(deposited), deposited
+
+        result = call_action(
+            ACTIONS["legal-trust-reconciliation"], conn,
+            ns(
+                trust_account_id=env["trust_account_id"],
+                statement_balance="1000.00",
+            ),
+        )
+        assert is_ok(result), result
+        assert result["book_balance"] == "1000.00"
+        assert result["calculated_balance"] == "1000.00"
+        assert result["client_ledger_total"] == "0.00"
+        assert result["book_to_client_difference"] == "1000.00"
+        assert result["client_ledger"] == []
+        assert result["is_reconciled"] is False
+
+    def test_transaction_company_mismatch_refuses(self, conn, env):
+        deposited = call_action(
+            ACTIONS["legal-deposit-trust"], conn,
+            ns(
+                company_id=env["company_id"],
+                trust_account_id=env["trust_account_id"],
+                amount="25.00",
+                matter_id=env["matter_id"],
+            ),
+        )
+        assert is_ok(deposited), deposited
+        other_company = seed_company(
+            conn, name="Other Legal Firm", abbr="OLF",
+        )
+        conn.execute(
+            "UPDATE legalclaw_trust_transaction SET company_id = ?",
+            (other_company,),
+        )
+        conn.commit()
+
+        result = call_action(
+            ACTIONS["legal-trust-reconciliation"], conn,
+            ns(
+                trust_account_id=env["trust_account_id"],
+                statement_balance="25.00",
+            ),
+        )
+        assert is_error(result), result
+        assert "company does not match the trust account" in result["message"]
+
+    def test_matter_company_mismatch_refuses(self, conn, env):
+        deposited = call_action(
+            ACTIONS["legal-deposit-trust"], conn,
+            ns(
+                company_id=env["company_id"],
+                trust_account_id=env["trust_account_id"],
+                amount="25.00",
+                matter_id=env["matter_id"],
+            ),
+        )
+        assert is_ok(deposited), deposited
+        other_company = seed_company(
+            conn, name="Other Matter Firm", abbr="OMF",
+        )
+        conn.execute(
+            "UPDATE legalclaw_matter SET company_id = ? WHERE id = ?",
+            (other_company, env["matter_id"]),
+        )
+        conn.commit()
+
+        result = call_action(
+            ACTIONS["legal-trust-reconciliation"], conn,
+            ns(
+                trust_account_id=env["trust_account_id"],
+                statement_balance="25.00",
+            ),
+        )
+        assert is_error(result), result
+        assert (
+            "company does not match its trust account and matter"
+            in result["message"]
+        )
+
+    def test_independent_statement_book_and_client_drift(self, conn, env):
+        deposited = call_action(
+            ACTIONS["legal-deposit-trust"], conn,
+            ns(
+                company_id=env["company_id"],
+                trust_account_id=env["trust_account_id"],
+                amount="100.00",
+                matter_id=env["matter_id"],
+            ),
+        )
+        assert is_ok(deposited), deposited
+        conn.execute(
+            "UPDATE legalclaw_trust_account SET current_balance = ? "
+            "WHERE id = ?",
+            ("99.98", env["trust_account_id"]),
+        )
+        conn.commit()
+
+        result = call_action(
+            ACTIONS["legal-trust-reconciliation"], conn,
+            ns(
+                trust_account_id=env["trust_account_id"],
+                statement_balance="99.99",
+            ),
+        )
+        assert is_ok(result), result
+        assert result["statement_balance"] == "99.99"
+        assert result["book_balance"] == "99.98"
+        assert result["calculated_balance"] == "100.00"
+        assert result["client_ledger_total"] == "100.00"
+        assert result["statement_to_book_difference"] == "0.01"
+        assert result["book_to_client_difference"] == "-0.02"
+        assert result["is_reconciled"] is False
+
+    def test_successful_reconciliation_is_read_only(self, conn, env):
+        deposited = call_action(
+            ACTIONS["legal-deposit-trust"], conn,
+            ns(
+                company_id=env["company_id"],
+                trust_account_id=env["trust_account_id"],
+                amount="100.10",
+                matter_id=env["matter_id"],
+            ),
+        )
+        assert is_ok(deposited), deposited
+        interest = call_action(
+            ACTIONS["legal-trust-interest-distribution"], conn,
+            ns(
+                company_id=env["company_id"],
+                trust_account_id=env["trust_account_id"],
+                amount="7.25",
+                transaction_date="2026-03-31",
+            ),
+        )
+        assert is_ok(interest), interest
+        before = self._state(conn)
+        result = call_action(
+            ACTIONS["legal-trust-reconciliation"], conn,
+            ns(
+                trust_account_id=env["trust_account_id"],
+                statement_balance="107.35",
+            ),
+        )
+        assert is_ok(result), result
+        assert result["is_reconciled"] is True
+        assert self._state(conn) == before
+
+    def test_ambiguous_transfer_direction_refuses_without_writes(
+            self, conn, env):
+        destination = seed_trust_account(
+            conn, env["company_id"], name="Legacy Destination",
+        )
+        deposited = call_action(
+            ACTIONS["legal-deposit-trust"], conn,
+            ns(
+                company_id=env["company_id"],
+                trust_account_id=env["trust_account_id"],
+                amount="50.00",
+                matter_id=env["matter_id"],
+            ),
+        )
+        assert is_ok(deposited), deposited
+        transferred = call_action(
+            ACTIONS["legal-transfer-trust"], conn,
+            ns(
+                company_id=env["company_id"],
+                trust_account_id=env["trust_account_id"],
+                to_trust_account_id=destination,
+                amount="10.00",
+            ),
+        )
+        assert is_ok(transferred), transferred
+        conn.execute(
+            "UPDATE legalclaw_trust_transaction SET description = ? "
+            "WHERE trust_account_id = ? AND transaction_type = ?",
+            ("Legacy transfer", env["trust_account_id"], "transfer"),
+        )
+        conn.commit()
+        before = self._state(conn)
+        result = call_action(
+            ACTIONS["legal-trust-reconciliation"], conn,
+            ns(
+                trust_account_id=env["trust_account_id"],
+                statement_balance="40.00",
+            ),
+        )
+        assert is_error(result), result
+        assert "stored direction is ambiguous" in result["message"]
+        assert self._state(conn) == before
 
     def test_statement_mismatch_not_reconciled(self, conn, env):
         matter_two = seed_matter(

@@ -57,13 +57,30 @@ def _validate_company(conn, company_id):
         err(f"Company {company_id} not found")
 
 
-def _validate_trust_account(conn, trust_account_id):
+def _validate_trust_account(conn, trust_account_id, company_id=None):
     if not trust_account_id:
         err("--trust-account-id is required")
     q = Q.from_(_ta).select(_ta.star).where(_ta.id == P())
-    row = conn.execute(q.get_sql(), (trust_account_id,)).fetchone()
+    params = [trust_account_id]
+    if company_id is not None:
+        q = q.where(_ta.company_id == P())
+        params.append(company_id)
+    row = conn.execute(q.get_sql(), params).fetchone()
     if not row:
+        if company_id is not None:
+            err("Trust account not found for this company")
         err(f"Trust account {trust_account_id} not found")
+    return row
+
+
+def _validate_trust_matter(conn, matter_id, company_id):
+    if not matter_id:
+        return None
+    query = Q.from_(_matter).select(_matter.id, _matter.trust_balance)
+    query = query.where(_matter.id == P()).where(_matter.company_id == P())
+    row = conn.execute(query.get_sql(), (matter_id, company_id)).fetchone()
+    if not row:
+        err("Matter not found for this company")
     return row
 
 
@@ -159,21 +176,18 @@ def list_trust_accounts(conn, args):
 # ---------------------------------------------------------------------------
 def deposit_trust(conn, args):
     ta_id = getattr(args, "trust_account_id", None)
-    ta_row = _validate_trust_account(conn, ta_id)
     _validate_company(conn, args.company_id)
+    ta_row = _validate_trust_account(conn, ta_id, args.company_id)
 
     amount_raw = getattr(args, "amount", None)
     if not amount_raw:
         err("--amount is required")
-    amount = to_decimal(amount_raw)
+    amount = round_currency(to_decimal(amount_raw))
     if amount <= 0:
         err("Deposit amount must be greater than 0")
 
     matter_id = getattr(args, "matter_id", None)
-    if matter_id:
-        mq = Q.from_(_matter).select(_matter.id).where(_matter.id == P())
-        if not conn.execute(mq.get_sql(), (matter_id,)).fetchone():
-            err(f"Matter {matter_id} not found")
+    _validate_trust_matter(conn, matter_id, args.company_id)
 
     transaction_date = getattr(args, "transaction_date", None) or datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -251,13 +265,25 @@ def write_trust_disbursement(conn, trust_account_id, amount, payee, matter_id,
     (when a matter is given), and posts the Trust Disbursement GL legs when
     the account is GL-linked, exactly as legal-disburse-trust always has.
 
-    Returns {"id", "new_balance", "gl_entry_ids"}. Performs no validation,
-    audit, commit or ok/err response; lets ValueError propagate so the caller
-    can roll the whole transaction back.
+    Returns {"id", "new_balance", "gl_entry_ids"}. Uses the same cents amount
+    as the public trust actions and refuses a nonpositive rounded amount.
+    Performs no audit, commit or ok/err response; lets ValueError propagate
+    so the caller can roll the whole transaction back.
     """
-    ta_q = Q.from_(_ta).select(_ta.star).where(_ta.id == P())
-    ta_row = conn.execute(ta_q.get_sql(), (trust_account_id,)).fetchone()
-    amount = to_decimal(amount)
+    ta_q = Q.from_(_ta).select(_ta.star).where(_ta.id == P()).where(_ta.company_id == P())
+    ta_row = conn.execute(ta_q.get_sql(), (trust_account_id, company_id)).fetchone()
+    if not ta_row:
+        raise ValueError("Trust account not found for this company")
+    matter_row = None
+    if matter_id:
+        matter_q = Q.from_(_matter).select(_matter.trust_balance)
+        matter_q = matter_q.where(_matter.id == P()).where(_matter.company_id == P())
+        matter_row = conn.execute(matter_q.get_sql(), (matter_id, company_id)).fetchone()
+        if not matter_row:
+            raise ValueError("Matter not found for this company")
+    amount = round_currency(to_decimal(amount))
+    if amount <= 0:
+        raise ValueError("Disbursement amount must be greater than 0 after rounding to cents")
     current_balance = to_decimal(ta_row["current_balance"])
 
     txn_id = str(uuid.uuid4())
@@ -280,8 +306,6 @@ def write_trust_disbursement(conn, trust_account_id, amount, payee, matter_id,
 
     # Update matter trust_balance if matter specified (Decimal math in Python, not SQL CAST)
     if matter_id:
-        mb_q = Q.from_(_matter).select(_matter.trust_balance).where(_matter.id == P())
-        matter_row = conn.execute(mb_q.get_sql(), (matter_id,)).fetchone()
         current_matter_balance = to_decimal(matter_row["trust_balance"] or "0")
         new_matter_balance = current_matter_balance - amount
         sql_m, params_m = dynamic_update("legalclaw_matter",
@@ -314,13 +338,13 @@ def write_trust_disbursement(conn, trust_account_id, amount, payee, matter_id,
 # ---------------------------------------------------------------------------
 def disburse_trust(conn, args):
     ta_id = getattr(args, "trust_account_id", None)
-    ta_row = _validate_trust_account(conn, ta_id)
     _validate_company(conn, args.company_id)
+    ta_row = _validate_trust_account(conn, ta_id, args.company_id)
 
     amount_raw = getattr(args, "amount", None)
     if not amount_raw:
         err("--amount is required")
-    amount = to_decimal(amount_raw)
+    amount = round_currency(to_decimal(amount_raw))
     if amount <= 0:
         err("Disbursement amount must be greater than 0")
 
@@ -330,10 +354,7 @@ def disburse_trust(conn, args):
 
     matter_id = getattr(args, "matter_id", None)
     if matter_id:
-        mq = Q.from_(_matter).select(_matter.id, _matter.trust_balance).where(_matter.id == P())
-        matter_row = conn.execute(mq.get_sql(), (matter_id,)).fetchone()
-        if not matter_row:
-            err(f"Matter {matter_id} not found")
+        matter_row = _validate_trust_matter(conn, matter_id, args.company_id)
         matter_balance_text = matter_row["trust_balance"] if matter_row["trust_balance"] is not None else "0"
         matter_balance = to_decimal(matter_balance_text)
         if amount > matter_balance:
@@ -374,19 +395,25 @@ def transfer_trust(conn, args):
     from_id = getattr(args, "trust_account_id", None)
     from_row = _validate_trust_account(conn, from_id)
     _validate_company(conn, args.company_id)
+    if from_row["company_id"] != args.company_id:
+        err("Source trust account belongs to another company")
 
     to_id = getattr(args, "to_trust_account_id", None)
     if not to_id:
         err("--to-trust-account-id is required")
+    if to_id == from_id:
+        err("Source and destination trust accounts must differ")
     to_q = Q.from_(_ta).select(_ta.star).where(_ta.id == P())
     to_row = conn.execute(to_q.get_sql(), (to_id,)).fetchone()
     if not to_row:
         err(f"Destination trust account {to_id} not found")
+    if to_row["company_id"] != args.company_id:
+        err("Destination trust account belongs to another company")
 
     amount_raw = getattr(args, "amount", None)
     if not amount_raw:
         err("--amount is required")
-    amount = to_decimal(amount_raw)
+    amount = round_currency(to_decimal(amount_raw))
     if amount <= 0:
         err("Transfer amount must be greater than 0")
 
@@ -696,13 +723,14 @@ def trust_balance_report(conn, args):
 # ---------------------------------------------------------------------------
 def trust_interest_distribution(conn, args):
     ta_id = getattr(args, "trust_account_id", None)
-    ta_row = _validate_trust_account(conn, ta_id)
     _validate_company(conn, args.company_id)
+    ta_row = _validate_trust_account(conn, ta_id, args.company_id)
+    _validate_trust_matter(conn, getattr(args, "matter_id", None), args.company_id)
 
     amount_raw = getattr(args, "amount", None)
     if not amount_raw:
         err("--amount is required (interest amount)")
-    amount = to_decimal(amount_raw)
+    amount = round_currency(to_decimal(amount_raw))
     if amount <= 0:
         err("Interest amount must be greater than 0")
 

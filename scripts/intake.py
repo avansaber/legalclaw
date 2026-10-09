@@ -605,8 +605,8 @@ def _settlement_split(args):
 
     Shared by legal-record-settlement and legal-calculate-contingency-fee so the
     two cannot drift. Refuses (through err) before the caller writes anything.
-    Returns (gross, pct, attorney_fee, costs, net_to_client); the fee and the net
-    are rounded ROUND_HALF_UP to 0.01.
+    Returns (gross, pct, attorney_fee, costs, net_to_client); the fee, costs and
+    net are rounded ROUND_HALF_UP to 0.01.
     """
     gross_amount = getattr(args, "gross_amount", None)
     if not gross_amount:
@@ -624,6 +624,7 @@ def _settlement_split(args):
         err("--contingency-pct must be between 0 and 100")
     if costs < 0:
         err("--costs-advanced must not be negative")
+    costs = round_currency(costs)
 
     attorney_fee = (gross * pct / Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     net_to_client = (gross - attorney_fee - costs).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)

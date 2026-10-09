@@ -93,7 +93,7 @@ class TestRecordSettlementSplit:
         assert is_ok(r), r
         row = _settlement(conn, r["settlement_id"])
         assert row["attorney_fee"] == "25.13"
-        assert row["costs_advanced"] == "0"
+        assert row["costs_advanced"] == "0.00"
         assert row["net_to_client"] == "75.37"
 
     def test_zero_percent_boundary(self, conn, env):

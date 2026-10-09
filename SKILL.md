@@ -91,13 +91,13 @@ python3 {baseDir}/scripts/db_query.py --action status
 | `legal-add-trust-account` | Create trust/IOLTA account |
 | `legal-get-trust-account` | Get trust account |
 | `legal-list-trust-accounts` | List trust accounts |
-| `legal-deposit-trust` | Deposit to trust |
-| `legal-disburse-trust` | Disburse from trust |
-| `legal-transfer-trust` | Transfer between trust accounts |
+| `legal-deposit-trust` | Deposit to trust, rounded to cents; refuse rounded zero or an account or supplied matter outside `--company-id` before writes |
+| `legal-disburse-trust` | Disburse from trust using one cents-rounded amount for balances and GL; refuse rounded zero or an account or supplied matter outside `--company-id` before writes |
+| `legal-transfer-trust` | Transfer a cents-rounded amount between distinct trust accounts in the specified company; refuse rounded zero, same-account and cross-company transfers |
 | `legal-list-trust-transactions` | List trust transactions |
 | `legal-trust-reconciliation` | Reconcile trust account (--trust-account-id, --statement-balance) |
 | `legal-trust-balance-report` | Trust balance report |
-| `legal-trust-interest-distribution` | Distribute trust interest |
+| `legal-trust-interest-distribution` | Distribute account-level trust interest using one cents-rounded amount for balances and GL; refuse rounded zero or an account or supplied matter outside `--company-id`. Interest does not credit a matter balance |
 
 ### Documents (10 actions)
 | Action | Description |
@@ -160,7 +160,7 @@ python3 {baseDir}/scripts/db_query.py --action status
 |--------|-------------|
 | `legal-generate-invoice-ledes` | Generate LEDES invoice |
 | `legal-validate-ledes` | Validate LEDES format |
-| `legal-calculate-contingency-fee` | Calculate contingency fee |
+| `legal-calculate-contingency-fee` | Preview the fee, costs advanced and client net with cents rounding matching settlement recording |
 | `legal-calculate-sol` | Calculate statute of limitations |
 | `legal-list-approaching-sol` | List approaching SOL |
 | `legal-check-retainer-balance` | Check retainer balance |
@@ -170,7 +170,7 @@ python3 {baseDir}/scripts/db_query.py --action status
 | Action | Description |
 |--------|-------------|
 | `legal-generate-replenishment-request` | Generate retainer replenishment |
-| `legal-record-settlement` | Record settlement |
+| `legal-record-settlement` | Record settlement with costs advanced rounded to cents; the response shows the stored cost and client net used for disbursement |
 | `legal-disburse-settlement` | Pay a pending settlement out of a trust account (--trust-account-id, --operating-account-id, --fee-income-account-id, --costs-recovery-account-id, --cost-center-id); the fee is booked as revenue and the recovered costs land in the firm's operating account |
 | `legal-settlement-report` | Settlement report |
 | `legal-add-communication` | Log communication |
